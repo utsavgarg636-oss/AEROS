@@ -1,0 +1,14 @@
+@keyframes pulse-red {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+}
+
+.animate-pulse-fast { 
+    animation: pulse-red 1s infinite; 
+}
+
+.glass-card { 
+    background: rgba(15, 23, 42, 0.75); 
+    backdrop-filter: blur(12px); 
+    border: 1px solid rgba(255, 255, 255, 0.1); 
+}
