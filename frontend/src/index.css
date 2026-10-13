@@ -1,0 +1,125 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --bg-main: #08111F;
+    --bg-surface: #111D2E;
+    --bg-card: rgba(17, 29, 46, 0.88);
+    --border-subtle: rgba(56, 189, 248, 0.16);
+    --cyan-accent: #38BDF8;
+    --red-alert: #FF4D5A;
+    --green-active: #22C55E;
+    --text-muted: #94A3B8;
+    --text-dim: #64748B;
+  }
+
+  body {
+    background-color: #08111F;
+    color: #F1F5F9;
+    font-family: 'Inter', sans-serif;
+    margin: 0;
+    padding: 0;
+    overflow-x: hidden;
+  }
+
+  h1, h2, h3, .font-hud {
+    font-family: 'Rajdhani', sans-serif;
+    letter-spacing: 0.05em;
+  }
+
+  .font-mono-code {
+    font-family: 'JetBrains Mono', monospace;
+  }
+}
+
+/* Futuristic Spatial Glassmorphism */
+.spatial-glass {
+  background: rgba(17, 29, 46, 0.85);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(56, 189, 248, 0.18);
+  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.65), inset 0 0 1px 1px rgba(255, 255, 255, 0.05);
+}
+
+.spatial-glass-red {
+  background: rgba(30, 10, 18, 0.88);
+  backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 77, 90, 0.4);
+  box-shadow: 0 8px 32px 0 rgba(255, 77, 90, 0.18), inset 0 0 12px rgba(255, 77, 90, 0.1);
+}
+
+.spatial-glow-cyan {
+  box-shadow: 0 0 24px -2px rgba(56, 189, 248, 0.45);
+}
+
+.spatial-glow-red {
+  box-shadow: 0 0 24px -2px rgba(255, 77, 90, 0.6);
+}
+
+.spatial-glow-green {
+  box-shadow: 0 0 24px -2px rgba(34, 197, 94, 0.45);
+}
+
+/* Custom Tactical Grid */
+.tactical-grid {
+  background-size: 32px 32px;
+  background-image: 
+    linear-gradient(to right, rgba(0, 217, 255, 0.04) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(0, 217, 255, 0.04) 1px, transparent 1px);
+}
+
+.tactical-dots {
+  background-image: radial-gradient(rgba(0, 217, 255, 0.15) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+/* Scanner Animation */
+@keyframes radar-sweep {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+.animate-radar {
+  animation: radar-sweep 8s linear infinite;
+}
+
+/* Corridor Flow Animation */
+@keyframes corridor-flow {
+  0% { stroke-dashoffset: 60; }
+  100% { stroke-dashoffset: 0; }
+}
+
+.animate-corridor {
+  stroke-dasharray: 8 6;
+  animation: corridor-flow 1.5s linear infinite;
+}
+
+/* 16x2 LCD Dot Matrix Style */
+.lcd-display {
+  font-family: 'JetBrains Mono', 'Courier New', monospace;
+  background-color: #0b1c0e;
+  color: #39ff14;
+  text-shadow: 0 0 8px rgba(57, 255, 20, 0.7);
+  border: 3px solid #143219;
+  letter-spacing: 2px;
+  box-shadow: inset 0 0 12px rgba(0, 0, 0, 0.8), 0 0 10px rgba(57, 255, 20, 0.2);
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #070B14;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 217, 255, 0.2);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 217, 255, 0.5);
+}
