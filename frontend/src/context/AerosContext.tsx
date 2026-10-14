@@ -140,6 +140,31 @@ export const AerosProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
   }, []);
 
+  // Actions
+  const createDemoIncident = useCallback(async () => {
+    try {
+      const updated = await createDemoIncidentApi();
+      setSharedState(updated);
+    } catch {
+      setSharedState(prev => ({
+        ...prev,
+        incident: {
+          id: 'INC-DEMO-2026',
+          detection_time: new Date().toLocaleTimeString(),
+          source: 'SIMULATED_DEMO_INCIDENT',
+          is_demo: true,
+          location: 'NH-24 West Approach (Sector 5 Corridor)',
+          severity: 'HIGH',
+          confidence_score: 91.5,
+          vehicles_involved: ['car', 'bus'],
+          verified: true,
+          status: 'ACCIDENT_DETECTED',
+          notes: 'Simulated demo collision registered.'
+        }
+      }));
+    }
+  }, []);
+
   // Poll backend health and shared state
   useEffect(() => {
     let isMounted = true;
@@ -159,8 +184,8 @@ export const AerosProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     };
 
     checkHealthAndSync();
-    // Fast 1000ms polling for shared multi-tab synchronization
-    const interval = setInterval(checkHealthAndSync, 1000);
+    // Fast 500ms polling for shared multi-tab & AI event synchronization
+    const interval = setInterval(checkHealthAndSync, 500);
 
     return () => {
       isMounted = false;
@@ -168,13 +193,29 @@ export const AerosProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     };
   }, [refreshState]);
 
-  // Actions
+  // ==========================================
+  // KEYBOARD OVERRIDE LISTENER (KEY 'A' SHORTCUT)
+  // ==========================================
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'a' || event.key === 'A') {
+        console.warn("EMERGENCY OVERRIDE TRIGGERED VIA KEY 'A'");
+        createDemoIncident();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [createDemoIncident]);
+
+  // Simulation controls
   const startSimulation = async () => {
     try {
       const updated = await startSimulationApi();
       setSharedState(updated);
     } catch {
-      // Local fallback if backend is momentarily unreachable
       setSharedState(prev => ({
         ...prev,
         is_simulating: true,
@@ -223,30 +264,6 @@ export const AerosProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     } catch {
       setSharedState(INITIAL_SHARED_STATE);
       setLatestInference(null);
-    }
-  };
-
-  const createDemoIncident = async () => {
-    try {
-      const updated = await createDemoIncidentApi();
-      setSharedState(updated);
-    } catch {
-      setSharedState(prev => ({
-        ...prev,
-        incident: {
-          id: 'INC-DEMO-2026',
-          detection_time: new Date().toLocaleTimeString(),
-          source: 'SIMULATED_DEMO_INCIDENT',
-          is_demo: true,
-          location: 'NH-24 West Approach (Sector 5 Corridor)',
-          severity: 'HIGH',
-          confidence_score: 91.5,
-          vehicles_involved: ['car', 'bus'],
-          verified: true,
-          status: 'ACCIDENT_DETECTED',
-          notes: 'Simulated demo collision registered.'
-        }
-      }));
     }
   };
 
