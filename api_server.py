@@ -3,6 +3,7 @@ import sys
 import time
 import base64
 import asyncio
+import threading
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 
@@ -54,6 +55,7 @@ model_path = os.path.join(BASE_DIR, "yolov8n.pt")
 sample_video_path = os.path.join(BASE_DIR, "sample_crash.mp4")
 
 detector = None
+detector_lock = threading.Lock()
 if detector_loaded:
     try:
         detector = AccidentDetector(model_path=model_path, conf_thresh=0.25, iou_thresh=0.15)
@@ -517,7 +519,8 @@ async def run_image_inference(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="Invalid image file or unsupported format.")
 
     start_time = time.time()
-    processed_frame, is_accident, severity = detector.process_frame(frame.copy())
+    with detector_lock:
+        processed_frame, is_accident, severity = detector.process_frame(frame.copy(), require_temporal_confirmation=False)
     elapsed_ms = round((time.time() - start_time) * 1000, 2)
 
     yolo_results = detector.model(cv2.resize(frame, (640, 480)), conf=detector.conf_thresh, verbose=False)
@@ -589,61 +592,198 @@ async def run_image_inference(file: UploadFile = File(...)):
 
 @app.get("/api/inference/sample-frame")
 def run_sample_frame_inference():
-    """Extracts a frame from existing sample_crash.mp4 and processes it with AccidentDetector."""
+    """
+    Extracts a frame from sample_crash.mp4 and processes it using
+    AccidentDetector.
+
+    An AI incident is registered only when the detector confirms
+    an accident. A potential collision is not treated as a confirmed
+    accident.
+    """
     if detector is None:
-        raise HTTPException(status_code=503, detail="Detector not loaded.")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Detector not loaded. Model error: {detector_error}"
+        )
+
     if not os.path.exists(sample_video_path):
-        raise HTTPException(status_code=404, detail="sample_crash.mp4 not found.")
+        raise HTTPException(
+            status_code=404,
+            detail="sample_crash.mp4 not found."
+        )
 
     cap = cv2.VideoCapture(sample_video_path)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    target_frame = min(45, max(0, total_frames // 3))
-    cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
-    ret, frame = cap.read()
-    cap.release()
+
+    try:
+        if not cap.isOpened():
+            raise HTTPException(
+                status_code=500,
+                detail="Could not open sample_crash.mp4."
+            )
+
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+        if total_frames <= 0:
+            raise HTTPException(
+                status_code=500,
+                detail="The sample video contains no readable frames."
+            )
+
+        target_frame = 25 if total_frames >= 26 else min(45, max(0, total_frames // 3))
+        cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
+
+        ret, frame = cap.read()
+
+    finally:
+        cap.release()
 
     if not ret or frame is None:
-        raise HTTPException(status_code=500, detail="Could not extract frame from sample video.")
+        raise HTTPException(
+            status_code=500,
+            detail="Could not extract frame from sample video."
+        )
 
     start_time = time.time()
-    processed_frame, is_accident, severity = detector.process_frame(frame)
+
+    # Run the existing accident detection model with lock and direct evaluation.
+    with detector_lock:
+        processed_frame, is_accident, candidate_severity = (
+            detector.process_frame(frame.copy(), require_temporal_confirmation=False)
+        )
+
     elapsed_ms = round((time.time() - start_time) * 1000, 2)
 
-    ret, buffer = cv2.imencode('.jpg', processed_frame)
-    encoded_image = base64.b64encode(buffer).decode('utf-8')
-
-    # Update real incident in shared store
-    real_incident = {
-        "id": f"INC-SAMPLE-{int(time.time() % 10000)}",
-        "detection_time": datetime.now().strftime("%H:%M:%S"),
-        "source": "REAL_YOLO_MODEL",
-        "is_demo": False,
-        "location": "NH-24 West Approach (Sector 5 Corridor)",
-        "severity": severity,
-        "confidence_score": 88.0,
-        "vehicles_involved": ["car", "car"],
-        "verified": True,
-        "status": "ACCIDENT_DETECTED",
-        "notes": f"Genuine frame {target_frame} inference on sample_crash.mp4 via AccidentDetector."
-    }
-    shared_store.incident = real_incident
-    shared_store.add_event(
-        "Accident",
-        f"Sample Video Frame Evaluated [{severity}]",
-        f"Inference on frame {target_frame} executed in {elapsed_ms}ms.",
-        "critical" if is_accident else "info"
+    # Obtain the objects detected by YOLO for reporting.
+    yolo_results = detector.model(
+        cv2.resize(frame, (640, 480)),
+        conf=detector.conf_thresh,
+        verbose=False
     )
+
+    detected_objects = []
+
+    for result in yolo_results:
+        for box in result.boxes:
+            class_id = int(box.cls[0])
+            class_name = detector.model.names[class_id]
+            confidence = float(box.conf[0])
+
+            if class_name in [
+                "car",
+                "motorcycle",
+                "bus",
+                "truck"
+            ]:
+                detected_objects.append({
+                    "class": class_name,
+                    "confidence": round(confidence, 4),
+                    "box": list(map(int, box.xyxy[0]))
+                })
+
+    # Keep confirmed severity separate from candidate severity.
+    confirmed_severity = (
+        candidate_severity if is_accident else "NONE"
+    )
+
+    # Update global inference telemetry.
+    latest_telemetry["latest_inference_time"] = (
+        datetime.now().isoformat()
+    )
+    latest_telemetry["last_accident_flag"] = bool(is_accident)
+    latest_telemetry["last_severity"] = confirmed_severity
+    latest_telemetry["detected_vehicles"] = [
+        obj["class"] for obj in detected_objects
+    ]
+    latest_telemetry["total_inferences"] += 1
+
+    incident_registered = False
+
+    # CRITICAL FIX:
+    # Do not create an incident when the detector has not confirmed one.
+    if is_accident:
+        real_incident = {
+            "id": f"INC-SAMPLE-{int(time.time() * 1000)}",
+            "detection_time": datetime.now().strftime("%H:%M:%S"),
+            "source": "AI_DETECTION",
+            "is_demo": False,
+            "location": "NH-24 West Approach (Sector 5 Corridor)",
+            "severity": confirmed_severity,
+            "confidence_score": (
+                round(
+                    max(obj["confidence"] for obj in detected_objects)
+                    * 100,
+                    1
+                )
+                if detected_objects
+                else None
+            ),
+            "vehicles_involved": [
+                obj["class"] for obj in detected_objects
+            ],
+            "verified": True,
+            "status": "ACCIDENT_DETECTED",
+            "notes": (
+                f"Accident confirmed by AccidentDetector on "
+                f"sample video frame {target_frame}."
+            )
+        }
+
+        shared_store.incident = real_incident
+        incident_registered = True
+
+        shared_store.add_event(
+            "Accident",
+            f"AI Accident Confirmed [{confirmed_severity}]",
+            (
+                f"AccidentDetector confirmed an accident on frame "
+                f"{target_frame}. Inference took {elapsed_ms} ms."
+            ),
+            "critical"
+        )
+
+    else:
+        # Do not overwrite an existing incident with a false detection.
+        shared_store.add_event(
+            "Inference",
+            "Sample Frame Evaluated - No Confirmed Accident",
+            (
+                f"Frame {target_frame} was evaluated in "
+                f"{elapsed_ms} ms. No confirmed accident was returned."
+            ),
+            "info"
+        )
+
+    # Encode the annotated frame for the frontend.
+    ret, buffer = cv2.imencode(".jpg", processed_frame)
+
+    if not ret:
+        raise HTTPException(
+            status_code=500,
+            detail="Could not encode processed frame."
+        )
+
+    encoded_image = base64.b64encode(buffer).decode("utf-8")
 
     return {
         "success": True,
         "source": "sample_crash.mp4",
         "frame_number": target_frame,
-        "accident_detected": is_accident,
-        "severity": severity,
+
+        # Confirmed accident state.
+        "accident_detected": bool(is_accident),
+        "severity": confirmed_severity,
+
+        # Diagnostic field: a candidate severity is not confirmation.
+        "candidate_severity": candidate_severity,
+
+        "incident_registered": incident_registered,
+        "detected_count": len(detected_objects),
+        "detected_objects": detected_objects,
         "inference_time_ms": elapsed_ms,
         "timestamp": datetime.now().isoformat(),
         "annotated_image": f"data:image/jpeg;base64,{encoded_image}"
     }
+
 
 
 def generate_video_stream():
@@ -662,7 +802,8 @@ def generate_video_stream():
             continue
 
         if detector:
-            processed_frame, is_accident, severity = detector.process_frame(frame)
+            with detector_lock:
+                processed_frame, is_accident, severity = detector.process_frame(frame)
             latest_telemetry["last_accident_flag"] = is_accident
             latest_telemetry["last_severity"] = severity
         else:

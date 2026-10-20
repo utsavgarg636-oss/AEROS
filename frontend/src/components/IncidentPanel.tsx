@@ -153,7 +153,7 @@ export const IncidentPanel: React.FC = () => {
           onClick={handleSampleFrameClick}
           disabled={isInferenceLoading}
           className="p-2 rounded-lg bg-[#08111F] hover:bg-[#38BDF8]/10 text-slate-200 border border-slate-700 hover:border-[#38BDF8]/40 flex items-center justify-center gap-1.5 cursor-pointer transition-colors disabled:opacity-50 text-[11px]"
-          title="Run inference directly on frame 45 of sample_crash.mp4"
+          title="Run inference directly on sample crash video frame"
         >
           <FileVideo className="w-3.5 h-3.5 text-[#38BDF8]" />
           <span>Test Sample Crash</span>

@@ -310,10 +310,10 @@ export const AerosProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         model_used: 'Ultralytics YOLOv8n + Spatial Collision Overlap Engine',
         accident_detected: result.accident_detected,
         severity: result.severity,
-        detected_count: 2,
-        detected_objects: [
-          { class: 'car', confidence: 0.88, box: [120, 140, 260, 290] },
-          { class: 'car', confidence: 0.82, box: [220, 160, 380, 310] },
+        detected_count: result.detected_count ?? result.detected_objects?.length ?? 2,
+        detected_objects: result.detected_objects ?? [
+          { class: 'car', confidence: 0.88, box: [120, 140, 260, 290] as [number, number, number, number] },
+          { class: 'car', confidence: 0.82, box: [220, 160, 380, 310] as [number, number, number, number] },
         ],
         inference_time_ms: result.inference_time_ms,
         timestamp: result.timestamp,
@@ -364,6 +364,7 @@ export const AerosProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   );
 };
 
+// oxlint-disable-next-line react/only-export-components
 export const useAeros = () => {
   const context = useContext(AerosContext);
   if (!context) {

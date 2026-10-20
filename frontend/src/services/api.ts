@@ -101,6 +101,8 @@ export async function runSampleFrameInference(): Promise<{
   inference_time_ms: number;
   timestamp: string;
   annotated_image: string;
+  detected_count?: number;
+  detected_objects?: Array<{ class: string; confidence: number; box: [number, number, number, number] }>;
 }> {
   const res = await fetch(`${API_BASE}/inference/sample-frame`);
   if (!res.ok) {

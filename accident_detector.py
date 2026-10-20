@@ -24,7 +24,7 @@ class AccidentDetector:
 
         return inter_area / float(union_area) if union_area > 0 else 0
 
-    def process_frame(self, frame):
+    def process_frame(self, frame, require_temporal_confirmation=True):
         frame = cv2.resize(frame, (640, 480))
         frame_area = 640 * 480
 
@@ -99,17 +99,23 @@ class AccidentDetector:
             else:
                 severity = "LOW"
 
-            if self.collision_start_time is None:
+            if not require_temporal_confirmation:
+                self.accident_flag = True
+            elif self.collision_start_time is None:
                 self.collision_start_time = time.time()
             elif time.time() - self.collision_start_time >= 0.3:  # 0.3s delay guarantees crash confirmation
                 self.accident_flag = True
                 
+            if self.accident_flag:
                 banner_text = f"CRITICAL ACCIDENT DETECTED! [{severity}]"
                 cv2.rectangle(frame, (0, 0), (frame.shape[1], 50), (0, 0, 200), -1)
                 cv2.putText(frame, banner_text, (20, 35),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         else:
-            self.collision_start_time = None
-            self.accident_flag = False
+            if require_temporal_confirmation:
+                self.collision_start_time = None
+                self.accident_flag = False
+            else:
+                return frame, False, "NONE"
 
         return frame, self.accident_flag, severity
