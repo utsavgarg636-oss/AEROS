@@ -8,7 +8,8 @@ import type {
   SingleJunctionRecord,
   HospitalRecord,
   TimelineEvent,
-  IoTTelemetry 
+  IoTTelemetry,
+  PatientVitals
 } from '../types';
 import { 
   fetchSharedState, 
@@ -22,7 +23,9 @@ import {
   hospitalMarkArrivedApi, 
   runImageInference as apiRunImageInference, 
   runSampleFrameInference as apiRunSampleFrame,
-  configureCameraSource
+  configureCameraSource,
+  updateVitalsApi,
+  togglePrioritySwitchApi
 } from '../services/api';
 
 const DEFAULT_JUNCTION: SingleJunctionRecord = {
@@ -62,10 +65,18 @@ const DEFAULT_HOSPITAL: HospitalRecord = {
   assigned_case_id: null,
 };
 
+const INITIAL_VITALS: PatientVitals = {
+  heart_rate: 78,
+  temperature: 36.8,
+  spo2: 98,
+};
+
 const INITIAL_SHARED_STATE: SharedSimulationState = {
   is_simulating: false,
   is_paused: false,
   simulation_step: 0,
+  priority_switch_on: true,
+  vitals: INITIAL_VITALS,
   incident: null,
   ambulance: DEFAULT_AMBULANCE,
   junction: DEFAULT_JUNCTION,
@@ -98,6 +109,8 @@ interface AerosContextType {
   isPaused: boolean;
   simulationStep: number;
   iot: IoTTelemetry | null;
+  vitals: PatientVitals;
+  prioritySwitchOn: boolean;
 
   // ML properties
   latestInference: RealInferenceResult | null;
@@ -110,6 +123,8 @@ interface AerosContextType {
   resumeSimulation: () => Promise<void>;
   resetSimulation: () => Promise<void>;
   createDemoIncident: () => Promise<void>;
+  togglePrioritySwitch: (active?: boolean) => Promise<void>;
+  updatePatientVitals: (data: { heart_rate?: number; bpm?: number; temperature?: number; spo2?: number }) => Promise<void>;
   acknowledgeHospitalCase: () => Promise<void>;
   markHospitalArrived: () => Promise<void>;
   runImageInference: (file: File) => Promise<void>;
@@ -329,6 +344,47 @@ export const AerosProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
   };
 
+  const togglePrioritySwitch = async (active?: boolean) => {
+    const newState = active !== undefined ? active : !(sharedState.priority_switch_on ?? true);
+    setSharedState(prev => ({
+      ...prev,
+      priority_switch_on: newState,
+      junction: {
+        ...prev.junction,
+        ambulance_signal: newState ? 'GREEN' : 'RED',
+        conflicting_signal: 'RED',
+        state_label: newState ? 'EMERGENCY PRIORITY GREEN (Conflicting Red)' : 'PRIORITY OFF (Hold at Red)'
+      }
+    }));
+    try {
+      await togglePrioritySwitchApi(newState);
+      await refreshState();
+    } catch (err) {
+      console.warn('Failed to toggle priority switch on backend:', err);
+    }
+  };
+
+  const updatePatientVitals = async (data: { heart_rate?: number; bpm?: number; temperature?: number; spo2?: number }) => {
+    const hr = data.heart_rate ?? data.bpm ?? sharedState.vitals?.heart_rate ?? 78;
+    const temp = data.temperature ?? sharedState.vitals?.temperature ?? 36.8;
+    const oxy = data.spo2 ?? sharedState.vitals?.spo2 ?? 98;
+    setSharedState(prev => ({
+      ...prev,
+      vitals: {
+        heart_rate: hr,
+        temperature: temp,
+        spo2: oxy,
+        timestamp: new Date().toISOString()
+      }
+    }));
+    try {
+      await updateVitalsApi({ heart_rate: hr, temperature: temp, spo2: oxy });
+      await refreshState();
+    } catch (err) {
+      console.warn('Failed to update vitals on backend:', err);
+    }
+  };
+
   const switchCameraSource = async (source: 'esp32' | 'sample', streamUrl?: string) => {
     try {
       await configureCameraSource(source, streamUrl);
@@ -357,6 +413,8 @@ export const AerosProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         isPaused: sharedState.is_paused,
         simulationStep: sharedState.simulation_step,
         iot: sharedState.iot || iot,
+        vitals: sharedState.vitals || INITIAL_VITALS,
+        prioritySwitchOn: sharedState.priority_switch_on ?? true,
 
         latestInference,
         isInferenceLoading,
@@ -367,6 +425,8 @@ export const AerosProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         resumeSimulation,
         resetSimulation,
         createDemoIncident,
+        togglePrioritySwitch,
+        updatePatientVitals,
         acknowledgeHospitalCase,
         markHospitalArrived,
         runImageInference,

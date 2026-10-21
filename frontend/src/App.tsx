@@ -1,7 +1,6 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AerosProvider } from './context/AerosContext';
-import { SystemDashboard } from './components/SystemDashboard';
-import { HospitalDashboard } from './components/HospitalDashboard';
+import { MainLayout } from './components/MainLayout';
 
 export default function App() {
   return (
@@ -9,8 +8,10 @@ export default function App() {
       <BrowserRouter>
         <Routes>
           <Route path="/" element={<Navigate to="/system" replace />} />
-          <Route path="/system" element={<SystemDashboard />} />
-          <Route path="/hospital" element={<HospitalDashboard />} />
+          <Route path="/system" element={<MainLayout />} />
+          <Route path="/hospital" element={<MainLayout />} />
+          <Route path="/status" element={<MainLayout />} />
+          <Route path="/events" element={<MainLayout />} />
           <Route path="*" element={<Navigate to="/system" replace />} />
         </Routes>
       </BrowserRouter>

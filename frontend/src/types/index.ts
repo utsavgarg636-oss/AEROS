@@ -67,10 +67,17 @@ export interface AmbulanceRecord {
   id: string;
   callsign: string;
   type: string;
-  status: 'STANDBY' | 'ASSIGNED' | 'APPROACHING' | 'CROSSING' | 'EN_ROUTE_HOSPITAL' | 'ARRIVED';
+  status: 'STANDBY' | 'ASSIGNED' | 'APPROACHING' | 'CROSSING' | 'EN_ROUTE_HOSPITAL' | 'ARRIVED' | 'EN_ROUTE_JUNCTION' | 'WAITING_SIGNAL' | 'FIRST_UTURN' | 'ARRIVED_AT_SCENE' | 'RETURN_TRANSIT' | 'SECOND_UTURN' | 'RETURNED_TO_HOSPITAL' | string;
   progress: number; // 0 to 100
   assigned_incident_id: string | null;
   driver: string;
+}
+
+export interface PatientVitals {
+  heart_rate: number;
+  temperature: number;
+  spo2: number;
+  timestamp?: string;
 }
 
 export interface SingleJunctionRecord {
@@ -143,6 +150,8 @@ export interface SharedSimulationState {
   is_simulating: boolean;
   is_paused: boolean;
   simulation_step: number;
+  priority_switch_on?: boolean;
+  vitals?: PatientVitals;
   incident: IncidentRecord | null;
   ambulance: AmbulanceRecord;
   junction: SingleJunctionRecord;

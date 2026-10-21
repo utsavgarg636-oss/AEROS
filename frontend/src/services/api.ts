@@ -121,6 +121,32 @@ export async function fetchIoTTelemetry(): Promise<IoTTelemetry | null> {
   }
 }
 
+export async function updateVitalsApi(vitals: { heart_rate?: number; bpm?: number; temperature?: number; spo2?: number }): Promise<any> {
+  const res = await fetch(`${API_BASE}/hospital/vitals`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(vitals),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to update vitals' }));
+    throw new Error(err.detail || 'Failed to update vitals');
+  }
+  return await res.json();
+}
+
+export async function togglePrioritySwitchApi(active: boolean): Promise<any> {
+  const res = await fetch(`${API_BASE}/junction/priority-switch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ active }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to toggle priority switch' }));
+    throw new Error(err.detail || 'Failed to toggle priority switch');
+  }
+  return await res.json();
+}
+
 export async function configureCameraSource(source: 'esp32' | 'sample', streamUrl?: string): Promise<any> {
   const res = await fetch(`${API_BASE}/camera/configure`, {
     method: 'POST',

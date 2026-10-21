@@ -118,12 +118,19 @@ class SharedStateStore:
         self.is_simulating = False
         self.is_paused = False
         self.simulation_step = 0
+        self.priority_switch_on = True
+        self.vitals = {
+            "heart_rate": 78,
+            "temperature": 36.8,
+            "spo2": 98,
+            "timestamp": datetime.now().isoformat()
+        }
         self.incident: Optional[Dict[str, Any]] = None
         self.ambulance: Dict[str, Any] = {
             "id": "AMB-101",
             "callsign": "Apex Critical Care 101",
             "type": "Advanced ICU Unit",
-            "status": "STANDBY",  # "STANDBY" | "ASSIGNED" | "APPROACHING" | "CROSSING" | "EN_ROUTE_HOSPITAL" | "ARRIVED"
+            "status": "STANDBY",  # "STANDBY" | "EN_ROUTE_JUNCTION" | "WAITING_SIGNAL" | "CROSSING" | "FIRST_UTURN" | "ARRIVED_AT_SCENE" | "RETURN_TRANSIT" | "SECOND_UTURN" | "RETURNED_TO_HOSPITAL"
             "progress": 0.0,      # 0 to 100%
             "assigned_incident_id": None,
             "driver": "Paramedic Capt. R. Sharma",
@@ -131,7 +138,7 @@ class SharedStateStore:
         self.junction: Dict[str, Any] = {
             "id": "J-CENTRAL",
             "name": "Central Corridor Junction (Grand Trunk & Medical Way)",
-            "corridor_direction": "West-to-East (Ambulance Route)",
+            "corridor_direction": "East-to-West / West-to-East (Ambulance Route)",
             "cross_direction": "North-to-South (Conflicting Traffic)",
             "ambulance_signal": "NORMAL_CYCLE",  # "NORMAL_CYCLE" | "GREEN" | "AMBER" | "RED"
             "conflicting_signal": "NORMAL_CYCLE", # "NORMAL_CYCLE" | "RED" | "AMBER"
@@ -183,6 +190,8 @@ class SharedStateStore:
             "is_simulating": self.is_simulating,
             "is_paused": self.is_paused,
             "simulation_step": self.simulation_step,
+            "priority_switch_on": self.priority_switch_on,
+            "vitals": self.vitals,
             "incident": self.incident,
             "ambulance": self.ambulance,
             "junction": self.junction,
@@ -345,25 +354,63 @@ class CameraCaptureManager:
             return False, f"Unreachable ({e})"
 
     def _generate_offline_frame(self, message: str, detail: str = "") -> bytes:
-        """Draws a clean, high-visibility tactical HUD offline/connecting placeholder frame."""
+        """Draws a clean, high-visibility tactical HUD offline/connecting placeholder frame with safe centered margins."""
         img = np.zeros((480, 640, 3), dtype=np.uint8)
-        img[:] = (248, 251, 245)  # Clean light mint-gray background (matches AEROS theme)
-        cv2.rectangle(img, (15, 15), (625, 465), (220, 235, 228), 2)
-        cv2.putText(img, "A.E.R.O.S. CCTV COMMAND FEED", (35, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (31, 41, 55), 2, cv2.LINE_AA)
-        cv2.putText(img, f"SOURCE: {self.active_source_type.upper()}", (35, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (107, 114, 128), 1, cv2.LINE_AA)
+        # Dark tactical CCTV background (matches AEROS theme)
+        img[:] = (24, 27, 34)  # BGR for #221B18
         
-        # Amber/Red status badge
-        cv2.rectangle(img, (35, 125), (605, 175), (254, 242, 242), -1)
-        cv2.rectangle(img, (35, 125), (605, 175), (252, 165, 165), 1)
-        cv2.putText(img, f"STATUS: {message}", (45, 158), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (220, 38, 38), 2, cv2.LINE_AA)
-        
+        # Subtle tactical grid / border
+        cv2.rectangle(img, (24, 24), (616, 456), (42, 48, 60), 1)
+        # Corner brackets
+        cv2.line(img, (24, 48), (24, 24), (0, 168, 107), 3)
+        cv2.line(img, (24, 24), (48, 24), (0, 168, 107), 3)
+        cv2.line(img, (616, 48), (616, 24), (0, 168, 107), 3)
+        cv2.line(img, (592, 24), (616, 24), (0, 168, 107), 3)
+        cv2.line(img, (24, 432), (24, 456), (0, 168, 107), 3)
+        cv2.line(img, (24, 456), (48, 456), (0, 168, 107), 3)
+        cv2.line(img, (616, 432), (616, 456), (0, 168, 107), 3)
+        cv2.line(img, (592, 456), (616, 456), (0, 168, 107), 3)
+
+        # Header Title (Centered in safe zone)
+        title_text = "A.E.R.O.S. CCTV VISION FEED"
+        (tw, _), _ = cv2.getTextSize(title_text, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
+        cv2.putText(img, title_text, ((640 - tw) // 2, 68), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (230, 240, 235), 2, cv2.LINE_AA)
+
+        sub_text = f"SOURCE: {self.active_source_type.upper()} • WEST APPROACH CAM"
+        (sw, _), _ = cv2.getTextSize(sub_text, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+        cv2.putText(img, sub_text, ((640 - sw) // 2, 98), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (140, 160, 155), 1, cv2.LINE_AA)
+
+        # Alert Badge Box (Centered in safe zone X=100..540)
+        box_top = 135
+        box_bottom = 205
+        cv2.rectangle(img, (90, box_top), (550, box_bottom), (30, 32, 45), -1)
+        cv2.rectangle(img, (90, box_top), (550, box_bottom), (65, 75, 180), 1)
+
+        status_text = f"STATUS: {message}"
+        (stw, _), _ = cv2.getTextSize(status_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+        cv2.putText(img, status_text, ((640 - stw) // 2, 178), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (90, 100, 245), 2, cv2.LINE_AA)
+
+        # Connection Detail Text
         if detail:
-            cv2.putText(img, detail[:65], (35, 210), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (107, 114, 128), 1, cv2.LINE_AA)
+            clean_detail = detail[:60]
+            (dw, _), _ = cv2.getTextSize(clean_detail, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
+            cv2.putText(img, clean_detail, ((640 - dw) // 2, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (160, 175, 170), 1, cv2.LINE_AA)
+
         if self.reconnect_attempts > 0:
-            cv2.putText(img, f"Reconnect attempt #{self.reconnect_attempts} (retrying every {self.reconnect_interval:.1f}s)...", (35, 245), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (140, 140, 140), 1, cv2.LINE_AA)
-            
-        timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        cv2.putText(img, timestamp_str, (35, 445), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (156, 163, 175), 1, cv2.LINE_AA)
+            rec_text = f"Retrying connection (#{self.reconnect_attempts}) every {self.reconnect_interval:.1f}s..."
+            (rw, _), _ = cv2.getTextSize(rec_text, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
+            cv2.putText(img, rec_text, ((640 - rw) // 2, 275), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (120, 140, 135), 1, cv2.LINE_AA)
+
+        # Center Reticle Target Graphic
+        cx, cy = 320, 350
+        cv2.circle(img, (cx, cy), 18, (45, 55, 70), 1)
+        cv2.line(img, (cx - 24, cy), (cx + 24, cy), (45, 55, 70), 1)
+        cv2.line(img, (cx, cy - 24), (cx, cy + 24), (45, 55, 70), 1)
+
+        timestamp_str = datetime.now().strftime("%Y-%m-%d  %H:%M:%S")
+        (tsw, _), _ = cv2.getTextSize(timestamp_str, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
+        cv2.putText(img, timestamp_str, ((640 - tsw) // 2, 435), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (110, 125, 120), 1, cv2.LINE_AA)
+
         ret, buf = cv2.imencode('.jpg', img)
         return buf.tobytes() if ret else b""
 
@@ -756,134 +803,182 @@ simulation_task_handle: Optional[asyncio.Task] = None
 
 async def simulation_runner():
     while True:
-        await asyncio.sleep(2.4)
+        await asyncio.sleep(2.0)
         if not shared_store.is_simulating or shared_store.is_paused:
             continue
 
-        shared_store.simulation_step += 1
         step = shared_store.simulation_step
 
-        if step == 1:
-            # Step 1: Accident Detected (if not already set)
+        # Step 0 -> 1: Accident Detection & Initial Dispatch from Bottom-Right Hospital
+        if step == 0:
             if not shared_store.incident:
                 shared_store.incident = {
-                    "id": "INC-DEMO-2026",
+                    "id": "INC-AUTO-2026",
                     "detection_time": datetime.now().strftime("%H:%M:%S"),
-                    "source": "SIMULATED_DEMO_INCIDENT",
+                    "source": "AI_COLLISION_DETECTOR",
                     "is_demo": True,
                     "location": "NH-24 West Approach (Sector 5 Corridor)",
                     "severity": "HIGH",
-                    "confidence_score": 92.4,
+                    "confidence_score": 93.8,
                     "vehicles_involved": ["car", "truck"],
                     "verified": True,
                     "status": "ACCIDENT_DETECTED",
-                    "notes": "Simulated multi-vehicle collision for corridor demonstration."
+                    "notes": "Accident detected at Upper-Left Sector. Emergency ambulance dispatched from Hospital (Bottom-Right)."
                 }
                 shared_store.add_event(
                     "Accident",
-                    "Demo Accident Registered [HIGH]",
-                    "Collision detected at West Approach. Emergency corridor alerted.",
+                    "Accident Detected [HIGH] - Upper-Left Sector",
+                    "Collision detected at West road approach. Automatically assigning and dispatching ambulance.",
                     "critical"
                 )
 
-        elif step == 2:
-            # Step 2: Ambulance Assigned and Approaching Junction
-            shared_store.ambulance["status"] = "APPROACHING"
-            shared_store.ambulance["progress"] = 25.0
-            shared_store.ambulance["assigned_incident_id"] = shared_store.incident["id"] if shared_store.incident else "INC-DEMO-2026"
-            if shared_store.incident:
-                shared_store.incident["status"] = "AMBULANCE_DISPATCHED"
-
-            # Hospital receives the case in transit
-            shared_store.hospital["assigned_case_id"] = shared_store.ambulance["assigned_incident_id"]
+            # Assign ambulance and start Step 1
+            shared_store.ambulance["status"] = "EN_ROUTE_JUNCTION"
+            shared_store.ambulance["progress"] = 10.0
+            shared_store.ambulance["assigned_incident_id"] = shared_store.incident["id"]
+            shared_store.incident["status"] = "AMBULANCE_DISPATCHED"
+            shared_store.hospital["assigned_case_id"] = shared_store.incident["id"]
             shared_store.hospital["arrival_status"] = "IN_TRANSIT"
 
             shared_store.add_event(
                 "Ambulance",
-                f"{shared_store.ambulance['id']} Dispatched & Rolling",
-                "Unit approaching Central Traffic Junction along West Corridor.",
-                "success"
-            )
-
-        elif step == 3:
-            # Step 3: Activate Predefined Emergency Signal Sequence
-            # INTERLOCK: Ambulance green, conflicting cross traffic MUST be RED
-            shared_store.junction["ambulance_signal"] = "GREEN"
-            shared_store.junction["conflicting_signal"] = "RED"
-            shared_store.junction["state_label"] = "EMERGENCY PRIORITY GREEN (Conflicting Red)"
-            shared_store.ambulance["progress"] = 45.0
-
-            if iot_adapter:
-                iot_adapter.set_emergency_corridor(active=True, ambulance_crossing=False)
-
-            shared_store.add_event(
-                "Traffic",
-                "Emergency Green Signal Activated",
-                "Central Junction switched to PRIORITY GREEN for ambulance. Conflicting cross traffic held at RED.",
+                "Step 1: Dispatched from Hospital (Bottom-Right)",
+                "Ambulance AMB-101 departed hospital in bottom-right corner, moving straight toward junction along East road.",
                 "info"
             )
+            shared_store.simulation_step = 1
 
-        elif step == 4:
-            # Step 4: Animate Ambulance Crossing Junction
+        # Step 1: Moving straight toward junction
+        elif step == 1:
+            shared_store.ambulance["progress"] = 20.0
+            shared_store.simulation_step = 2
+
+        # Step 2: Stop at Junction while Traffic-Light Priority is handled
+        elif step == 2:
+            shared_store.ambulance["progress"] = 25.0
+            shared_store.ambulance["status"] = "WAITING_SIGNAL"
+
+            # Check if priority switch is ON
+            if not shared_store.priority_switch_on:
+                # Switch is OFF: Hold at RED signal
+                shared_store.junction["ambulance_signal"] = "RED"
+                shared_store.junction["conflicting_signal"] = "RED"
+                shared_store.junction["state_label"] = "PRIORITY OFF (Ambulance Stopped at Junction)"
+                # Stay on step 2 until switch is toggled ON
+                continue
+            else:
+                # Switch is ON: Turn appropriate signal GREEN and conflicting RED
+                shared_store.junction["ambulance_signal"] = "GREEN"
+                shared_store.junction["conflicting_signal"] = "RED"
+                shared_store.junction["state_label"] = "EMERGENCY PRIORITY GREEN (Conflicting Red)"
+
+                if iot_adapter:
+                    iot_adapter.set_emergency_corridor(active=True, ambulance_crossing=False)
+
+                shared_store.add_event(
+                    "Traffic",
+                    "Step 2: Priority Signal GREEN Activated",
+                    "Ambulance priority switch is ON. East junction approach signal set to GREEN; cross traffic held at RED.",
+                    "success"
+                )
+                shared_store.simulation_step = 3
+
+        # Step 3: Cross through junction & first U-turn at designated end of road
+        elif step == 3:
             shared_store.ambulance["status"] = "CROSSING"
-            shared_store.ambulance["progress"] = 55.0
-            shared_store.junction["state_label"] = "AMBULANCE CROSSING INTERSECTION"
-
+            shared_store.ambulance["progress"] = 35.0
+            shared_store.junction["state_label"] = "AMBULANCE CROSSING JUNCTION"
             if iot_adapter:
                 iot_adapter.set_emergency_corridor(active=True, ambulance_crossing=True)
+            shared_store.simulation_step = 4
 
-            shared_store.add_event(
-                "Traffic",
-                "Ambulance Safely Crossing Junction",
-                "Vehicle clearing central intersection. Conflicting traffic continues to wait at RED.",
-                "info"
-            )
-
-        elif step == 5:
-            # Step 5: Return signals to safe demo state after crossing event
-            shared_store.junction["ambulance_signal"] = "NORMAL_CYCLE"
-            shared_store.junction["conflicting_signal"] = "NORMAL_CYCLE"
-            shared_store.junction["state_label"] = "Safe Demo State Restored (Normal Cycle)"
-            shared_store.ambulance["status"] = "EN_ROUTE_HOSPITAL"
-            shared_store.ambulance["progress"] = 75.0
-
-            if iot_adapter:
-                iot_adapter.restore_safe_demo_state()
-
-            shared_store.add_event(
-                "Traffic",
-                "Signals Returned to Safe Demo State",
-                "Corridor safely de-escalated. Central junction returned to normal traffic cycles.",
-                "info"
-            )
-
-        elif step == 6:
-            # Step 6: Ambulance Moving toward Single Hospital
-            shared_store.ambulance["progress"] = 92.0
+        elif step == 4:
+            # Continuing along West road toward U-turn turnaround loop
+            shared_store.ambulance["status"] = "FIRST_UTURN"
+            shared_store.ambulance["progress"] = 48.0
             shared_store.add_event(
                 "Ambulance",
-                "Approaching Apex Emergency Gate",
-                "Ambulance on final medical access boulevard toward hospital entrance.",
+                "Step 3: First U-Turn at Designated Road End",
+                "Ambulance crossed junction and executed smooth U-turn at West turnaround loop following road geometry.",
                 "info"
             )
+            shared_store.simulation_step = 5
+
+        # Step 4: Reach the Accident Site in upper-left area
+        elif step == 5:
+            shared_store.ambulance["status"] = "ARRIVED_AT_SCENE"
+            shared_store.ambulance["progress"] = 58.0
+            if shared_store.incident:
+                shared_store.incident["status"] = "AMBULANCE_AT_SCENE"
+
+            shared_store.add_event(
+                "Ambulance",
+                "Step 4: Reached Accident Site",
+                "Ambulance arrived at collision site in upper-left area. Paramedics stabilizing patient and loading into ICU unit.",
+                "critical"
+            )
+            shared_store.simulation_step = 6
+
+        # Step 5: Return Journey (Straight along road toward turning point & hospital)
+        elif step == 6:
+            shared_store.ambulance["status"] = "RETURN_TRANSIT"
+            shared_store.ambulance["progress"] = 68.0
+
+            # Traffic signal priority for return crossing
+            if shared_store.priority_switch_on:
+                shared_store.junction["ambulance_signal"] = "GREEN"
+                shared_store.junction["conflicting_signal"] = "RED"
+                shared_store.junction["state_label"] = "PRIORITY GREEN (Return Crossing Active)"
+            else:
+                shared_store.junction["ambulance_signal"] = "RED"
+                shared_store.junction["conflicting_signal"] = "RED"
+                shared_store.junction["state_label"] = "PRIORITY OFF (Hold at Red)"
+                continue
+
+            shared_store.add_event(
+                "Ambulance",
+                "Step 5: Return Journey toward East Turning Point",
+                "Ambulance heading East across junction with patient toward turnaround loop.",
+                "info"
+            )
+            shared_store.simulation_step = 7
 
         elif step == 7:
-            # Step 7: Ambulance Arrives at Single Hospital
-            shared_store.ambulance["status"] = "ARRIVED"
+            # Second U-Turn at East turnaround loop
+            shared_store.ambulance["status"] = "SECOND_UTURN"
+            shared_store.ambulance["progress"] = 85.0
+            shared_store.add_event(
+                "Ambulance",
+                "Step 5: Second U-Turn Executed",
+                "Completed smooth U-turn at East turnaround loop, returning along road toward hospital bay in bottom-right corner.",
+                "info"
+            )
+            shared_store.simulation_step = 8
+
+        # Step 6: Hospital Arrival in bottom-right corner
+        elif step == 8:
+            shared_store.ambulance["status"] = "RETURNED_TO_HOSPITAL"
             shared_store.ambulance["progress"] = 100.0
             shared_store.hospital["arrival_status"] = "ARRIVED"
             shared_store.hospital["arrived_at"] = datetime.now().strftime("%H:%M:%S")
 
             if shared_store.incident:
-                shared_store.incident["status"] = "ARRIVED_AT_HOSPITAL"
+                shared_store.incident["status"] = "RETURNED_TO_HOSPITAL"
+
+            shared_store.junction["ambulance_signal"] = "NORMAL_CYCLE"
+            shared_store.junction["conflicting_signal"] = "NORMAL_CYCLE"
+            shared_store.junction["state_label"] = "Returned to Hospital • Safe Normal Traffic Restored"
+
+            if iot_adapter:
+                iot_adapter.restore_safe_demo_state()
 
             shared_store.add_event(
                 "Hospital",
-                "Ambulance Arrived at Apex Emergency Hospital",
-                "Patient successfully delivered to hospital triage bay. Awaiting triage case mark.",
+                "Step 6: Returned to Hospital (Bottom-Right)",
+                "Ambulance successfully returned to hospital in bottom-right corner. Patient admitted to Trauma Bay.",
                 "success"
             )
-            # Finish automated progression; pause simulation loop
+            # Complete simulation
             shared_store.is_simulating = False
 
 
@@ -960,6 +1055,97 @@ def get_system_status():
 def get_simulation_state():
     """Returns the shared single-source-of-truth state for both /system and /hospital."""
     return shared_store.get_state()
+
+
+class VitalsUpdateRequest(BaseModel):
+    heart_rate: Optional[int] = None
+    bpm: Optional[int] = None
+    temperature: Optional[float] = None
+    spo2: Optional[int] = None
+
+
+class PrioritySwitchRequest(BaseModel):
+    active: bool
+
+
+@app.post("/api/hospital/vitals")
+@app.post("/api/vitals")
+def update_patient_vitals(data: VitalsUpdateRequest):
+    """
+    Handles live heart rate BPM, temperature, and SpO2 telemetry in the hospital dashboard
+    through an extensible API endpoint supplied to it.
+    """
+    hr = data.heart_rate if data.heart_rate is not None else data.bpm
+    if hr is not None:
+        shared_store.vitals["heart_rate"] = int(hr)
+    if data.temperature is not None:
+        shared_store.vitals["temperature"] = float(data.temperature)
+    if data.spo2 is not None:
+        shared_store.vitals["spo2"] = int(data.spo2)
+    shared_store.vitals["timestamp"] = datetime.now().isoformat()
+
+    hr_val = shared_store.vitals["heart_rate"]
+    severity = "critical" if hr_val > 120 or hr_val < 50 else ("warning" if hr_val > 100 else "info")
+    shared_store.add_event(
+        "Hospital",
+        f"Telemetry Received: {hr_val} BPM",
+        f"Hospital received live patient vitals via API: Heart Rate {hr_val} bpm, Temp {shared_store.vitals['temperature']}°C, SpO2 {shared_store.vitals['spo2']}%.",
+        severity
+    )
+    return {
+        "success": True,
+        "vitals": shared_store.vitals,
+        "timestamp": datetime.now().isoformat()
+    }
+
+
+@app.get("/api/hospital/vitals")
+@app.get("/api/vitals")
+def get_patient_vitals():
+    """Returns current patient clinical vitals."""
+    return shared_store.vitals
+
+
+@app.post("/api/junction/priority-switch")
+@app.post("/api/traffic/priority")
+def set_priority_switch(req: PrioritySwitchRequest):
+    """
+    Handles the ambulance-priority switch:
+    - When ON: Turn appropriate signal for ambulance's direction GREEN and conflicting traffic signals RED.
+    - When OFF: Restore RED signal state and keep ambulance stopped if passage is not permitted.
+    - Do not allow conflicting traffic directions to have green signals simultaneously.
+    """
+    shared_store.priority_switch_on = req.active
+
+    if req.active:
+        shared_store.junction["ambulance_signal"] = "GREEN"
+        shared_store.junction["conflicting_signal"] = "RED"
+        shared_store.junction["state_label"] = "EMERGENCY PRIORITY GREEN (Conflicting Red)"
+        if iot_adapter:
+            iot_adapter.set_emergency_corridor(active=True, ambulance_crossing=shared_store.ambulance["status"] == "CROSSING")
+        shared_store.add_event(
+            "Traffic",
+            "Ambulance Priority Switch: ON",
+            "Emergency priority signal switched to GREEN. Conflicting traffic held at RED.",
+            "success"
+        )
+    else:
+        shared_store.junction["ambulance_signal"] = "RED"
+        shared_store.junction["conflicting_signal"] = "RED"
+        shared_store.junction["state_label"] = "PRIORITY OFF (Hold at Red Signal)"
+        if iot_adapter:
+            iot_adapter.restore_safe_demo_state()
+        shared_store.add_event(
+            "Traffic",
+            "Ambulance Priority Switch: OFF",
+            "Priority signal restored to RED. Ambulance passage not permitted until switch is ON.",
+            "warning"
+        )
+    return {
+        "success": True,
+        "priority_switch_on": shared_store.priority_switch_on,
+        "junction": shared_store.junction
+    }
 
 
 @app.post("/api/simulation/start")
@@ -1169,10 +1355,13 @@ async def run_image_inference(file: UploadFile = File(...)):
             "notes": "Verified by genuine YOLOv8 inference and collision overlap."
         }
         shared_store.incident = real_incident
+        shared_store.is_simulating = True
+        shared_store.is_paused = False
+        shared_store.simulation_step = 0
         shared_store.add_event(
             "Accident",
             f"Genuine ML Collision Detected [{severity}]",
-            f"Real YOLOv8 inference identified {len(detected_objects)} vehicles with spatial collision overlap.",
+            f"Real YOLOv8 inference identified {len(detected_objects)} vehicles with spatial collision overlap. Ambulance automatically dispatched from Hospital.",
             "critical"
         )
 
@@ -1329,6 +1518,9 @@ def run_sample_frame_inference():
         }
 
         shared_store.incident = real_incident
+        shared_store.is_simulating = True
+        shared_store.is_paused = False
+        shared_store.simulation_step = 0
         incident_registered = True
 
         shared_store.add_event(
@@ -1336,7 +1528,7 @@ def run_sample_frame_inference():
             f"AI Accident Confirmed [{confirmed_severity}]",
             (
                 f"AccidentDetector confirmed an accident on frame "
-                f"{target_frame}. Inference took {elapsed_ms} ms."
+                f"{target_frame}. Inference took {elapsed_ms} ms. Emergency ambulance dispatched from Hospital."
             ),
             "critical"
         )
