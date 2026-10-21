@@ -14,10 +14,20 @@ export interface HardwareComponentStatus {
   error?: string | null;
   supported_classes?: string[];
   source?: string;
+  source_type?: 'esp32' | 'sample';
+  active_source?: 'esp32' | 'sample';
+  configured_source?: 'esp32' | 'sample';
   live_stream_available?: boolean;
   junction_count?: number;
   hospital_count?: number;
   note?: string;
+  frame_width?: number;
+  frame_height?: number;
+  fps?: number;
+  reconnect_attempts?: number;
+  diagnostic_message?: string;
+  is_fallback_active?: boolean;
+  last_successful_frame?: string | null;
 }
 
 export interface SystemStatusData {

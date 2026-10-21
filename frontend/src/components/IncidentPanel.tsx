@@ -17,12 +17,14 @@ import { useAeros } from '../context/AerosContext';
 export const IncidentPanel: React.FC = () => {
   const {
     backendConnected,
+    systemStatus,
     incident,
     latestInference,
     isInferenceLoading,
     inferenceError,
     runImageInference,
     runSampleVideoFrameInference,
+    switchCameraSource,
     createDemoIncident,
     resetSimulation,
   } = useAeros();
@@ -30,6 +32,18 @@ export const IncidentPanel: React.FC = () => {
   const [streamActive, setStreamActive] = useState<boolean>(true);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const cameraComp = systemStatus?.components?.camera;
+  const isEsp32 = cameraComp?.source_type === 'esp32' || (!cameraComp?.source_type && Boolean(cameraComp?.source?.includes('ESP32')));
+  const isCameraConnected = cameraComp?.status === 'CONNECTED';
+
+  const feedLabel = !backendConnected
+    ? 'DEMO PLAYBACK'
+    : isEsp32
+      ? isCameraConnected
+        ? 'FEED: ESP32-CAM LIVE'
+        : 'FEED: ESP32-CAM (DISCONNECTED)'
+      : 'FEED: sample_crash.mp4';
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -114,9 +128,13 @@ export const IncidentPanel: React.FC = () => {
 
         {/* Live HUD Overlay (Top-Left) */}
         <div className="absolute top-2 left-2 flex items-center gap-1.5 px-2 py-1 rounded bg-black/75 backdrop-blur-md border border-white/10 text-[10px] font-mono">
-          <span className={`w-2 h-2 rounded-full ${backendConnected ? 'bg-[#22C55E] animate-ping' : 'bg-[#F59E0B]'}`} />
+          <span className={`w-2 h-2 rounded-full ${
+            !backendConnected
+              ? 'bg-[#F59E0B]'
+              : (isEsp32 ? (isCameraConnected ? 'bg-[#22C55E] animate-ping' : 'bg-[#EF4444]') : 'bg-[#38BDF8] animate-ping')
+          }`} />
           <span className="font-bold text-white">
-            {backendConnected ? 'FEED: sample_crash.mp4' : 'DEMO PLAYBACK'}
+            {feedLabel}
           </span>
         </div>
 
@@ -145,6 +163,35 @@ export const IncidentPanel: React.FC = () => {
             </span>
           </div>
         )}
+      </div>
+
+      {/* Camera Feed Source Selector */}
+      <div className="flex items-center justify-between p-2 rounded-lg bg-[#08111F] border border-slate-800 text-xs font-mono">
+        <span className="text-slate-400 text-[10px] pl-1 font-semibold uppercase">Feed Source:</span>
+        <div className="flex gap-1.5">
+          <button
+            onClick={() => switchCameraSource('esp32')}
+            className={`px-2.5 py-1 rounded text-[10px] font-bold transition-all cursor-pointer ${
+              isEsp32
+                ? 'bg-[#38BDF8]/20 text-[#38BDF8] border border-[#38BDF8]/50 shadow-[0_0_8px_rgba(56,189,248,0.25)]'
+                : 'text-slate-400 hover:text-white border border-slate-800 bg-slate-900/60'
+            }`}
+            title="Switch to live ESP32-CAM stream endpoint"
+          >
+            ESP32-CAM (Live)
+          </button>
+          <button
+            onClick={() => switchCameraSource('sample')}
+            className={`px-2.5 py-1 rounded text-[10px] font-bold transition-all cursor-pointer ${
+              !isEsp32
+                ? 'bg-amber-500/20 text-[#F59E0B] border border-[#F59E0B]/50 shadow-[0_0_8px_rgba(245,158,11,0.25)]'
+                : 'text-slate-400 hover:text-white border border-slate-800 bg-slate-900/60'
+            }`}
+            title="Switch to local sample crash video"
+          >
+            Sample Video
+          </button>
+        </div>
       </div>
 
       {/* CCTV Action Buttons */}

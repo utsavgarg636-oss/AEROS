@@ -21,7 +21,8 @@ import {
   hospitalAcknowledgeApi, 
   hospitalMarkArrivedApi, 
   runImageInference as apiRunImageInference, 
-  runSampleFrameInference as apiRunSampleFrame
+  runSampleFrameInference as apiRunSampleFrame,
+  configureCameraSource
 } from '../services/api';
 
 const DEFAULT_JUNCTION: SingleJunctionRecord = {
@@ -113,6 +114,7 @@ interface AerosContextType {
   markHospitalArrived: () => Promise<void>;
   runImageInference: (file: File) => Promise<void>;
   runSampleVideoFrameInference: () => Promise<void>;
+  switchCameraSource: (source: 'esp32' | 'sample', streamUrl?: string) => Promise<void>;
   refreshState: () => Promise<void>;
 }
 
@@ -327,6 +329,19 @@ export const AerosProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
   };
 
+  const switchCameraSource = async (source: 'esp32' | 'sample', streamUrl?: string) => {
+    try {
+      await configureCameraSource(source, streamUrl);
+      const statusRes = await checkSystemStatus();
+      if (statusRes.connected && statusRes.data) {
+        setSystemStatus(statusRes.data);
+      }
+      await refreshState();
+    } catch (err: any) {
+      console.error('Failed to switch camera source:', err);
+    }
+  };
+
   return (
     <AerosContext.Provider
       value={{
@@ -356,6 +371,7 @@ export const AerosProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         markHospitalArrived,
         runImageInference,
         runSampleVideoFrameInference,
+        switchCameraSource,
         refreshState,
       }}
     >

@@ -120,3 +120,16 @@ export async function fetchIoTTelemetry(): Promise<IoTTelemetry | null> {
     return null;
   }
 }
+
+export async function configureCameraSource(source: 'esp32' | 'sample', streamUrl?: string): Promise<any> {
+  const res = await fetch(`${API_BASE}/camera/configure`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ source, stream_url: streamUrl }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to configure camera' }));
+    throw new Error(err.detail || 'Failed to configure camera');
+  }
+  return await res.json();
+}
