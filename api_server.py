@@ -803,7 +803,7 @@ simulation_task_handle: Optional[asyncio.Task] = None
 
 async def simulation_runner():
     while True:
-        await asyncio.sleep(2.0)
+        await asyncio.sleep(2.4)
         if not shared_store.is_simulating or shared_store.is_paused:
             continue
 
@@ -978,8 +978,12 @@ async def simulation_runner():
                 "Ambulance successfully returned to hospital in bottom-right corner. Patient admitted to Trauma Bay.",
                 "success"
             )
-            # Complete simulation
-            shared_store.is_simulating = False
+            # Mission completed: Keep state as RETURNED_TO_HOSPITAL until operator resets
+            shared_store.simulation_step = 9
+
+        elif step == 9:
+            # Idle in completed state, waiting for user reset
+            continue
 
 
 @app.on_event("startup")

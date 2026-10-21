@@ -7,17 +7,19 @@ export const TrafficSignalStatusCard: React.FC = () => {
     junction, 
     ambulance, 
     prioritySwitchOn, 
+    corridorProgress,
     isSimulating 
   } = useAeros();
 
   const isPriorityOn = prioritySwitchOn ?? true;
-  const progress = ambulance.progress || 0;
-  const isCorridorActive = isSimulating && ambulance.status !== 'STANDBY';
+  // Use real-time 60fps corridorProgress when simulating for instant 0ms update, fallback to ambulance.progress
+  const progress = isSimulating && corridorProgress > 0 ? corridorProgress : (ambulance.progress || 0);
+  const isCorridorActive = isSimulating && (ambulance.status !== 'STANDBY' || corridorProgress > 0);
 
-  // Eastbound return crossing (Step 5: West signal is green)
-  const isReturnCrossing = progress >= 68 && progress <= 80;
-  // Westbound outbound crossing (Step 1-3: East signal is green)
-  const isOutboundCrossing = progress >= 20 && progress <= 38;
+  // Outbound crossing: updates IMMEDIATELY as ambulance reaches East light zone (progress >= 17 to <= 34)
+  const isOutboundCrossing = progress >= 17 && progress <= 34;
+  // Eastbound return crossing: updates IMMEDIATELY as ambulance reaches West light zone (progress >= 64 to <= 78)
+  const isReturnCrossing = progress >= 64 && progress <= 78;
 
   const isEastGreen = isOutboundCrossing && isPriorityOn;
   const isWestGreen = isReturnCrossing && isPriorityOn;

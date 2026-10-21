@@ -18,6 +18,7 @@ export const SingleJunctionMap: React.FC = () => {
     togglePrioritySwitch, 
     startSimulation, 
     resetSimulation, 
+    setCorridorProgress,
     isSimulating,
     isPaused
   } = useAeros();
@@ -33,11 +34,23 @@ export const SingleJunctionMap: React.FC = () => {
   const animFrameRef = useRef<number>(0);
 
   const isPriorityOn = prioritySwitchOn ?? true;
+  const isPriorityRef = useRef(isPriorityOn);
+  isPriorityRef.current = isPriorityOn;
+
+  const isPausedRef = useRef(isPaused);
+  isPausedRef.current = isPaused;
+
+  const setCorridorProgressRef = useRef(setCorridorProgress);
+  setCorridorProgressRef.current = setCorridorProgress;
+
+  const progressRef = useRef<number>(0);
 
   // Sync animation progress with simulation state
   useEffect(() => {
-    if (!isSimulating || ambulance.status === 'STANDBY') {
+    if (!isSimulating) {
+      progressRef.current = 0;
       setAnimProgress(0);
+      setCorridorProgressRef.current(0);
       pauseRef.current = 0;
       setPhaseDescription('Standby at Hospital (Bottom-Right)');
       return;
@@ -49,110 +62,112 @@ export const SingleJunctionMap: React.FC = () => {
       const dt = Math.min((currentTime - lastTime) / 1000, 0.1);
       lastTime = currentTime;
 
-      if (!isPaused) {
-        setAnimProgress((prev) => {
-          let next = prev;
+      if (!isPausedRef.current) {
+        const prev = progressRef.current;
+        let next = prev;
+        const priorityActive = isPriorityRef.current;
 
-          // -------------------------------------------------------------
-          // STEP 1 & 2: Hospital -> East Stop Line (Stop at Junction)
-          // -------------------------------------------------------------
-          if (prev < 22) {
-            setPhaseDescription('Step 1: Hospital → East Junction Approach');
-            next = Math.min(prev + dt * 11, 22);
-          } else if (prev >= 22 && prev < 22.05) {
-            // Reached East Stop Line! Check Priority Mode
-            if (!isPriorityOn) {
-              // Priority is OFF: Hold stopped indefinitely at red signal
-              setPhaseDescription('Step 2: Stopped at East Red Signal (Priority OFF)');
-              return 22;
-            } else {
-              // Priority is ON: Take a slight pause (1.2s = ~72 frames)
-              if (pauseRef.current < 72) {
-                pauseRef.current += 1;
-                setPhaseDescription('Step 2: East Green Priority Active (Pausing at Stop Line)');
-                return 22;
-              } else {
-                // Resume moving across junction!
-                pauseRef.current = 0;
-                next = 22.1;
-              }
-            }
-          } 
-          // -------------------------------------------------------------
-          // STEP 3: Crossing Junction & West Road to First U-Turn
-          // -------------------------------------------------------------
-          else if (prev >= 22.05 && prev < 34) {
-            setPhaseDescription('Step 3: Crossing Central Intersection (Priority Green)');
-            next = prev + dt * 11;
-          } else if (prev >= 34 && prev < 44) {
-            setPhaseDescription('Step 3: Continuing West toward Turnaround Loop');
-            next = prev + dt * 11;
-          } else if (prev >= 44 && prev < 50) {
-            setPhaseDescription('Step 3: Executing Smooth First U-Turn at West End');
-            next = prev + dt * 6.5; // Smooth realistic turning speed
-          } 
-          // -------------------------------------------------------------
-          // STEP 4: West Upper Lane to Accident Site (Stop at Scene)
-          // -------------------------------------------------------------
-          else if (prev >= 50 && prev < 58) {
-            setPhaseDescription('Step 4: Approaching Accident Site (Upper-Left)');
-            next = Math.min(prev + dt * 10, 58);
-          } else if (prev >= 58 && prev < 58.05) {
-            // Reached Accident Location! Stop and pause (~2.2s = ~130 frames)
-            if (pauseRef.current < 130) {
-              pauseRef.current += 1;
-              setPhaseDescription('Step 4: Arrived at Accident Site • Loading Patient into ICU');
-              return 58;
-            } else {
-              // Patient loaded! Resume return journey
-              pauseRef.current = 0;
-              next = 58.1;
-            }
-          } 
-          // -------------------------------------------------------------
-          // STEP 5: Return Journey to West Stop Line -> Junction -> East U-Turn
-          // -------------------------------------------------------------
-          else if (prev >= 58.05 && prev < 68) {
-            setPhaseDescription('Step 5: Return Transit toward Junction (West Approach)');
-            next = Math.min(prev + dt * 11, 68);
-          } else if (prev >= 68 && prev < 68.05) {
-            // Reached West Stop Line at Junction!
-            if (!isPriorityOn) {
-              setPhaseDescription('Step 5: Stopped at West Red Signal (Priority OFF)');
-              return 68;
-            } else {
-              if (pauseRef.current < 72) {
-                pauseRef.current += 1;
-                setPhaseDescription('Step 5: West Green Priority Active (Pausing at Stop Line)');
-                return 68;
-              } else {
-                pauseRef.current = 0;
-                next = 68.1;
-              }
-            }
-          } else if (prev >= 68.05 && prev < 78) {
-            setPhaseDescription('Step 5: Crossing Junction Eastbound with Patient');
-            next = prev + dt * 11;
-          } else if (prev >= 78 && prev < 84) {
-            setPhaseDescription('Step 5: En Route to East Turnaround Loop');
-            next = prev + dt * 11;
-          } else if (prev >= 84 && prev < 90) {
-            setPhaseDescription('Step 5: Executing Smooth Second U-Turn at East End');
-            next = prev + dt * 6.5;
-          } 
-          // -------------------------------------------------------------
-          // STEP 6: Hospital Arrival in Bottom-Right Corner
-          // -------------------------------------------------------------
-          else if (prev >= 90 && prev < 100) {
-            setPhaseDescription('Step 6: Final Approach to Hospital Intake Bay');
-            next = Math.min(prev + dt * 10, 100);
+        // -------------------------------------------------------------
+        // STEP 1 & 2: Hospital -> East Stop Line (Stop at Junction)
+        // -------------------------------------------------------------
+        if (prev < 22) {
+          setPhaseDescription(prev >= 17 ? 'Step 2: East Priority Green Active • Approaching Stop Line' : 'Step 1: Hospital → East Junction Approach');
+          next = Math.min(prev + dt * 7.5, 22);
+        } else if (prev >= 22 && prev < 22.05) {
+          // Reached East Stop Line! Check Priority Mode
+          if (!priorityActive) {
+            // Priority is OFF: Hold stopped indefinitely at red signal
+            setPhaseDescription('Step 2: Stopped at East Red Signal (Priority OFF)');
+            next = 22;
           } else {
-            setPhaseDescription('Step 6: Returned to Hospital (Bottom-Right) • Patient Handover');
-            return 100;
+            // Priority is ON: Slight natural pause (~0.35s = ~22 frames)
+            if (pauseRef.current < 22) {
+              pauseRef.current += 1;
+              setPhaseDescription('Step 2: East Green Priority Active • Crossing Junction');
+              next = 22;
+            } else {
+              // Resume moving across junction!
+              pauseRef.current = 0;
+              next = 22.1;
+            }
           }
+        } 
+        // -------------------------------------------------------------
+        // STEP 3: Crossing Junction & West Road to First U-Turn
+        // -------------------------------------------------------------
+        else if (prev >= 22.05 && prev < 34) {
+          setPhaseDescription('Step 3: Crossing Central Intersection (Priority Green)');
+          next = prev + dt * 7.5;
+        } else if (prev >= 34 && prev < 44) {
+          setPhaseDescription('Step 3: Continuing West toward Turnaround Loop');
+          next = prev + dt * 7.5;
+        } else if (prev >= 44 && prev < 50) {
+          setPhaseDescription('Step 3: Executing Smooth First U-Turn at West End');
+          next = prev + dt * 5.0; // Smooth realistic turning speed
+        } 
+        // -------------------------------------------------------------
+        // STEP 4: West Upper Lane to Accident Site (Stop at Scene)
+        // -------------------------------------------------------------
+        else if (prev >= 50 && prev < 58) {
+          setPhaseDescription('Step 4: Approaching Accident Site (Upper-Left)');
+          next = Math.min(prev + dt * 7.5, 58);
+        } else if (prev >= 58 && prev < 58.05) {
+          // Reached Accident Location! Stop and pause (~1.5s = ~90 frames)
+          if (pauseRef.current < 90) {
+            pauseRef.current += 1;
+            setPhaseDescription('Step 4: Arrived at Accident Site • Loading Patient into ICU');
+            next = 58;
+          } else {
+            // Patient loaded! Resume return journey
+            pauseRef.current = 0;
+            next = 58.1;
+          }
+        } 
+        // -------------------------------------------------------------
+        // STEP 5: Return Journey to West Stop Line -> Junction -> East U-Turn
+        // -------------------------------------------------------------
+        else if (prev >= 58.05 && prev < 68) {
+          setPhaseDescription(prev >= 64 ? 'Step 5: West Priority Green Active • Approaching Stop Line' : 'Step 5: Return Transit toward Junction (West Approach)');
+          next = Math.min(prev + dt * 7.5, 68);
+        } else if (prev >= 68 && prev < 68.05) {
+          // Reached West Stop Line at Junction!
+          if (!priorityActive) {
+            setPhaseDescription('Step 5: Stopped at West Red Signal (Priority OFF)');
+            next = 68;
+          } else {
+            if (pauseRef.current < 22) {
+              pauseRef.current += 1;
+              setPhaseDescription('Step 5: West Green Priority Active • Crossing Junction');
+              next = 68;
+            } else {
+              pauseRef.current = 0;
+              next = 68.1;
+            }
+          }
+        } else if (prev >= 68.05 && prev < 78) {
+          setPhaseDescription('Step 5: Crossing Junction Eastbound with Patient');
+          next = prev + dt * 7.5;
+        } else if (prev >= 78 && prev < 84) {
+          setPhaseDescription('Step 5: En Route to East Turnaround Loop');
+          next = prev + dt * 7.5;
+        } else if (prev >= 84 && prev < 90) {
+          setPhaseDescription('Step 5: Executing Smooth Second U-Turn at East End');
+          next = prev + dt * 5.0;
+        } 
+        // -------------------------------------------------------------
+        // STEP 6: Hospital Arrival in Bottom-Right Corner
+        // -------------------------------------------------------------
+        else if (prev >= 90 && prev < 100) {
+          setPhaseDescription('Step 6: Final Approach to Hospital Intake Bay');
+          next = Math.min(prev + dt * 7.5, 100);
+        } else {
+          setPhaseDescription('Step 6: Returned to Hospital (Bottom-Right) • Patient Handover');
+          next = 100;
+        }
 
-          return next;
-        });
+        progressRef.current = next;
+        setAnimProgress(next);
+        setCorridorProgressRef.current(next);
       }
 
       animFrameRef.current = requestAnimationFrame(loop);
@@ -160,7 +175,7 @@ export const SingleJunctionMap: React.FC = () => {
 
     animFrameRef.current = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(animFrameRef.current);
-  }, [isSimulating, isPaused, isPriorityOn, ambulance.status]);
+  }, [isSimulating]);
 
   const p = animProgress;
 
@@ -235,10 +250,10 @@ export const SingleJunctionMap: React.FC = () => {
   // =========================================================================
   const isCorridorActive = isSimulating && p > 0;
 
-  // Outbound crossing window (Westbound through junction: s between 21 and 35)
-  const isOutboundCrossing = p >= 21.8 && p <= 35;
-  // Return crossing window (Eastbound through junction: s between 67.8 and 79)
-  const isReturnCrossing = p >= 67.8 && p <= 79;
+  // Outbound crossing window: updates IMMEDIATELY as ambulance reaches East traffic light (p >= 17 to p <= 34)
+  const isOutboundCrossing = p >= 17 && p <= 34;
+  // Return crossing window: updates IMMEDIATELY as ambulance reaches West traffic light (p >= 64 to p <= 78)
+  const isReturnCrossing = p >= 64 && p <= 78;
 
   // Signal lights:
   const northSignal: SignalColor = isCorridorActive ? 'RED' : 'CYCLE';
@@ -507,16 +522,16 @@ export const SingleJunctionMap: React.FC = () => {
               strokeWidth={westSignal === 'GREEN' ? '4' : '3'}
               filter={westSignal === 'GREEN' ? 'url(#glow-green-lamp)' : ''}
             />
-            {/* North Stop Line */}
-            <line x1="420" y1="210" x2="500" y2="210" stroke="#FF4D5A" strokeWidth="3" />
-            {/* South Stop Line */}
-            <line x1="500" y1="410" x2="580" y2="410" stroke="#FF4D5A" strokeWidth="3" />
+            {/* North Stop Line (controlling Southbound entrance into junction: X=500..580) */}
+            <line x1="500" y1="210" x2="580" y2="210" stroke="#FF4D5A" strokeWidth="3" />
+            {/* South Stop Line (controlling Northbound entrance into junction: X=420..500) */}
+            <line x1="420" y1="410" x2="500" y2="410" stroke="#FF4D5A" strokeWidth="3" />
 
             {/* ============================================================= */}
             {/* E. CORRECT ROAD DIRECTION ARROWS (MATCHING TRUE MOVEMENT!) */}
             {/* Lower lane: flows WEST (points LEFT ◄) */}
             {/* Upper lane: flows EAST (points RIGHT ►) */}
-            {/* North/South lanes: flows Southbound (▼) and Northbound (▲) */}
+            {/* Vertical roads: Left lane flows NORTH (▲), Right lane flows SOUTH (▼) */}
             {/* ============================================================= */}
             
             {/* 1. LOWER LANE (Y=350): TRAVELS FROM RIGHT TO LEFT (WESTBOUND) */}
@@ -559,52 +574,69 @@ export const SingleJunctionMap: React.FC = () => {
               <line x1="810" y1="270" x2="830" y2="270" stroke="#FFFFFF" strokeWidth="2.5" />
             </g>
 
-            {/* 3. NORTH ROAD ARROWS: Southbound (▼) on Left, Northbound (▲) on Right */}
+            {/* 3. NORTH ROAD (UPPER HIGHWAY) ARROWS: Northbound (▲) on Left, Southbound (▼) on Right */}
             <g fill="#FFFFFF" opacity="0.9">
-              {/* Left lane (Southbound into junction): ▼ */}
-              <path d="M 460 175 L 454 163 L 466 163 Z" />
-              <line x1="460" y1="163" x2="460" y2="145" stroke="#FFFFFF" strokeWidth="2.5" />
-              {/* Right lane (Northbound out of junction): ▲ */}
-              <path d="M 540 145 L 534 157 L 546 157 Z" />
-              <line x1="540" y1="157" x2="540" y2="175" stroke="#FFFFFF" strokeWidth="2.5" />
+              {/* Left lane (Northbound out of junction): ▲ */}
+              <path d="M 460 145 L 454 157 L 466 157 Z" />
+              <line x1="460" y1="157" x2="460" y2="175" stroke="#FFFFFF" strokeWidth="2.5" />
+              {/* Right lane (Southbound into junction): ▼ */}
+              <path d="M 540 175 L 534 163 L 546 163 Z" />
+              <line x1="540" y1="163" x2="540" y2="145" stroke="#FFFFFF" strokeWidth="2.5" />
             </g>
 
-            {/* 4. SOUTH ROAD ARROWS: Southbound (▼) on Left, Northbound (▲) on Right */}
+            {/* 4. SOUTH ROAD (LOWER HIGHWAY) ARROWS: Northbound (▲) on Left, Southbound (▼) on Right */}
             <g fill="#FFFFFF" opacity="0.9">
-              {/* Left lane (Southbound out of junction): ▼ */}
-              <path d="M 460 475 L 454 463 L 466 463 Z" />
-              <line x1="460" y1="463" x2="460" y2="445" stroke="#FFFFFF" strokeWidth="2.5" />
-              {/* Right lane (Northbound into junction): ▲ */}
-              <path d="M 540 445 L 534 457 L 546 457 Z" />
-              <line x1="540" y1="457" x2="540" y2="475" stroke="#FFFFFF" strokeWidth="2.5" />
+              {/* Left lane (Northbound into junction): ▲ */}
+              <path d="M 460 445 L 454 457 L 466 457 Z" />
+              <line x1="460" y1="457" x2="460" y2="475" stroke="#FFFFFF" strokeWidth="2.5" />
+              {/* Right lane (Southbound out of junction): ▼ */}
+              <path d="M 540 475 L 534 463 L 546 463 Z" />
+              <line x1="540" y1="463" x2="540" y2="445" stroke="#FFFFFF" strokeWidth="2.5" />
             </g>
 
             {/* ============================================================= */}
-            {/* F. NORMAL VEHICLES ON ROAD (MATCHING REFERENCE IMAGE) */}
-            {/* Red car on West road, White cars on North and East roads */}
+            {/* F. DEMO VEHICLES ONLY ON UPPER AND LOWER HIGHWAYS */}
+            {/* Strictly off horizontal road so they never collide with ambulance */}
             {/* ============================================================= */}
-            {/* Red Car (West road lower lane) */}
-            <g transform="translate(515, 325)">
-              <rect x="-16" y="-8" width="32" height="16" rx="4" fill="#E53935" />
-              <rect x="-8" y="-6" width="16" height="12" rx="2" fill="#B71C1C" />
-              <rect x="-14" y="-7" width="4" height="2" fill="#FFEB3B" />
-              <rect x="-14" y="5" width="4" height="2" fill="#FFEB3B" />
+            
+            {/* 1. Upper Highway (North Road): Red Car (Southbound lane, heading ▼) */}
+            <g transform="translate(540, 95)">
+              <rect x="-8" y="-15" width="16" height="30" rx="4" fill="#E53935" stroke="#B71C1C" strokeWidth="1" />
+              <rect x="-6" y="2" width="12" height="8" rx="2" fill="#B71C1C" />
+              <circle cx="-5" cy="13" r="2" fill="#FFF59D" />
+              <circle cx="5" cy="13" r="2" fill="#FFF59D" />
+              <circle cx="-5" cy="-13" r="1.5" fill="#7F1D1D" />
+              <circle cx="5" cy="-13" r="1.5" fill="#7F1D1D" />
             </g>
 
-            {/* White Car (North road southbound lane) */}
-            <g transform="translate(460, 95)">
+            {/* 2. Upper Highway (North Road): White Car (Northbound lane, heading ▲) */}
+            <g transform="translate(460, 135)">
               <rect x="-8" y="-15" width="16" height="30" rx="4" fill="#FFFFFF" stroke="#CFD8DC" strokeWidth="1" />
-              <rect x="-6" y="-6" width="12" height="12" rx="2" fill="#90A4AE" />
-              <circle cx="-5" cy="12" r="2" fill="#FF5252" />
-              <circle cx="5" cy="12" r="2" fill="#FF5252" />
+              <rect x="-6" y="-10" width="12" height="8" rx="2" fill="#90A4AE" />
+              <circle cx="-5" cy="-13" r="2" fill="#FFF59D" />
+              <circle cx="5" cy="-13" r="2" fill="#FFF59D" />
+              <circle cx="-5" cy="13" r="1.5" fill="#FF5252" />
+              <circle cx="5" cy="13" r="1.5" fill="#FF5252" />
             </g>
 
-            {/* White Car (East road upper lane) */}
-            <g transform="translate(670, 270)">
-              <rect x="-16" y="-8" width="32" height="16" rx="4" fill="#FFFFFF" stroke="#CFD8DC" strokeWidth="1" />
-              <rect x="-8" y="-6" width="16" height="12" rx="2" fill="#90A4AE" />
-              <circle cx="13" cy="-5" r="2" fill="#FFF59D" />
-              <circle cx="13" cy="5" r="2" fill="#FFF59D" />
+            {/* 3. Lower Highway (South Road): White Car (Northbound lane, heading ▲) */}
+            <g transform="translate(460, 490)">
+              <rect x="-8" y="-15" width="16" height="30" rx="4" fill="#FFFFFF" stroke="#CFD8DC" strokeWidth="1" />
+              <rect x="-6" y="-10" width="12" height="8" rx="2" fill="#90A4AE" />
+              <circle cx="-5" cy="-13" r="2" fill="#FFF59D" />
+              <circle cx="5" cy="-13" r="2" fill="#FFF59D" />
+              <circle cx="-5" cy="13" r="1.5" fill="#FF5252" />
+              <circle cx="5" cy="13" r="1.5" fill="#FF5252" />
+            </g>
+
+            {/* 4. Lower Highway (South Road): Cyan/Blue Car (Southbound lane, heading ▼) */}
+            <g transform="translate(540, 530)">
+              <rect x="-8" y="-15" width="16" height="30" rx="4" fill="#0284C7" stroke="#0369A1" strokeWidth="1" />
+              <rect x="-6" y="2" width="12" height="8" rx="2" fill="#0369A1" />
+              <circle cx="-5" cy="13" r="2" fill="#FFF59D" />
+              <circle cx="5" cy="13" r="2" fill="#FFF59D" />
+              <circle cx="-5" cy="-13" r="1.5" fill="#EF4444" />
+              <circle cx="5" cy="-13" r="1.5" fill="#EF4444" />
             </g>
 
             {/* ============================================================= */}

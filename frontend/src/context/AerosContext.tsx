@@ -111,6 +111,8 @@ interface AerosContextType {
   iot: IoTTelemetry | null;
   vitals: PatientVitals;
   prioritySwitchOn: boolean;
+  corridorProgress: number;
+  setCorridorProgress: (p: number) => void;
 
   // ML properties
   latestInference: RealInferenceResult | null;
@@ -140,6 +142,7 @@ export const AerosProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [systemStatus, setSystemStatus] = useState<SystemStatusData | null>(null);
   const [sharedState, setSharedState] = useState<SharedSimulationState>(INITIAL_SHARED_STATE);
   const [iot, setIot] = useState<IoTTelemetry | null>(null);
+  const [corridorProgress, setCorridorProgress] = useState<number>(0);
 
   const [latestInference, setLatestInference] = useState<RealInferenceResult | null>(null);
   const [isInferenceLoading, setIsInferenceLoading] = useState<boolean>(false);
@@ -274,6 +277,7 @@ export const AerosProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   };
 
   const resetSimulation = async () => {
+    setCorridorProgress(0);
     try {
       const updated = await resetSimulationApi();
       setSharedState(updated);
@@ -415,6 +419,8 @@ export const AerosProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         iot: sharedState.iot || iot,
         vitals: sharedState.vitals || INITIAL_VITALS,
         prioritySwitchOn: sharedState.priority_switch_on ?? true,
+        corridorProgress,
+        setCorridorProgress,
 
         latestInference,
         isInferenceLoading,
