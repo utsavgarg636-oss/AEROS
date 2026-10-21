@@ -96,20 +96,20 @@ export const SingleJunctionMap: React.FC = () => {
     : (junction.conflicting_signal === 'AMBER' ? 'AMBER' : 'CYCLE');
 
   return (
-    <div className="spatial-glass rounded-2xl p-3.5 lg:p-4 flex flex-col h-full border border-[#38BDF8]/20 relative overflow-hidden select-none shadow-2xl bg-[#111D2E]/90">
+    <div className="bg-white rounded-2xl p-3.5 lg:p-4 flex flex-col h-full border border-[#E3EEE8] relative overflow-hidden select-none shadow-sm">
       
       {/* Header Bar */}
-      <div className="flex flex-wrap items-center justify-between pb-3 border-b border-slate-800/80 gap-2 z-20">
+      <div className="flex flex-wrap items-center justify-between pb-3 border-b border-slate-100 gap-2 z-20">
         <div className="flex items-center gap-2.5">
-          <div className="w-7 h-7 rounded-lg bg-[#08111F] border border-[#38BDF8]/40 flex items-center justify-center">
+          <div className="w-8 h-8 rounded-lg bg-[#DDF7EA] border border-[#A7F3D0] flex items-center justify-center">
             <Radio className="w-3.5 h-3.5 text-[#38BDF8] animate-pulse" />
           </div>
           <div>
             <div className="flex items-center gap-2">
-              <h2 className="text-sm font-bold tracking-wider font-hud text-white uppercase">
+              <h2 className="text-sm font-bold tracking-wider font-bold tracking-tight text-slate-800">
                 Physical Prototype Digital Twin
               </h2>
-              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-[#38BDF8]/10 text-[#38BDF8] border border-[#38BDF8]/30 font-bold">
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-[#DDF7EA] text-[#065F46] border border-[#A7F3D0] font-bold">
                 1 JUNCTION • 4 SIGNALS • U-TURN CORRIDOR
               </span>
             </div>
@@ -120,14 +120,14 @@ export const SingleJunctionMap: React.FC = () => {
         </div>
 
         {/* Safety Interlock Pill */}
-        <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-950/70 border border-[#22C55E]/40 text-[10px] font-mono text-[#22C55E] shadow-sm">
-          <ShieldCheck className="w-3.5 h-3.5 text-[#22C55E]" />
+        <div className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-50 border border-emerald-200 text-[10px] font-mono text-emerald-800 shadow-xs">
+          <ShieldCheck className="w-3.5 h-3.5 text-[#10B981]" />
           <span className="font-semibold">CONFLICTING GREENS INTERLOCKED (FAIL-SAFE)</span>
         </div>
       </div>
 
       {/* Main SVG Vector Canvas */}
-      <div className="relative flex-1 min-h-[500px] lg:min-h-[540px] bg-[#08111F] rounded-xl overflow-hidden mt-3 border border-slate-800/80 tactical-grid flex items-center justify-center">
+      <div className="relative flex-1 min-h-[500px] lg:min-h-[540px] bg-[#0A111E] rounded-xl overflow-hidden mt-3 border border-slate-800 flex items-center justify-center shadow-inner">
         
         {/* Soft Ambient Radial Lighting */}
         <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(ellipse_at_center,_rgba(56,189,248,0.06)_0%,_transparent_70%)]" />
@@ -800,7 +800,7 @@ export const SingleJunctionMap: React.FC = () => {
           <div className="flex items-center gap-2">
             <span className="text-slate-400">Junction State:</span>
             <span className={`font-bold px-2 py-0.5 rounded text-[10px] ${
-              isCorridorGreen ? 'bg-emerald-500/20 text-[#22C55E] border border-[#22C55E]/40' : 'bg-slate-800 text-slate-300'
+              isCorridorGreen ? 'bg-emerald-500/20 text-[#10B981] border border-[#22C55E]/40' : 'bg-slate-800 text-slate-300'
             }`}>
               {junction.state_label}
             </span>

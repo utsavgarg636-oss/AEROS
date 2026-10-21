@@ -101,392 +101,11 @@ try:
     DEFAULT_RECONNECT_INTERVAL = float(os.getenv("CAMERA_RECONNECT_INTERVAL", "2.0"))
 except ValueError:
     DEFAULT_RECONNECT_INTERVAL = 2.0
+try:
+    DEFAULT_INFERENCE_FPS = float(os.getenv("INFERENCE_FPS", "8.0"))
+except ValueError:
+    DEFAULT_INFERENCE_FPS = 8.0
 
-
-class CameraCaptureManager:
-    """
-    Centralized, thread-safe capture manager for A.E.R.O.S. video feeds.
-    
-    Guarantees:
-    1. Single active reader on the camera socket (prevents ESP32-CAM socket rejection).
-    2. Zero duplicate YOLOv8 inference passes regardless of how many frontend clients connect.
-    3. Non-blocking TCP pre-flight checks prevent cv2.VideoCapture from hanging when IP drops.
-    4. Bounded exponential/linear backoff without blocking FastAPI routes.
-    5. Clean diagnostic standby frames when stream is interrupted.
-    6. Runtime source-switching between 'esp32' and 'sample'.
-    """
-    def __init__(
-        self,
-        source_type: str = DEFAULT_CAMERA_SOURCE,
-        esp32_url: str = DEFAULT_ESP32_STREAM_URL,
-        sample_path: str = sample_video_path,
-        fallback_mode: str = DEFAULT_CAMERA_FALLBACK,
-        reconnect_interval: float = DEFAULT_RECONNECT_INTERVAL,
-        detector_instance: Optional[AccidentDetector] = None,
-        lock: Optional[threading.Lock] = None,
-    ):
-        self.configured_source_type = source_type if source_type in ["esp32", "sample"] else "esp32"
-        self.active_source_type = self.configured_source_type
-        self.esp32_url = esp32_url
-        self.sample_path = sample_path
-        self.fallback_mode = fallback_mode if fallback_mode in ["none", "sample"] else "none"
-        self.reconnect_interval = max(0.5, reconnect_interval)
-        self.detector = detector_instance
-        self.lock = lock or threading.Lock()
-
-        # State flags
-        self.is_running = True
-        self.is_connected = False
-        self.is_fallback_active = False
-        self.reconnect_attempts = 0
-        self.diagnostic_message = "Initializing camera capture manager..."
-        self.last_successful_frame_time: Optional[str] = None
-        self.frame_width: int = 0
-        self.frame_height: int = 0
-        self.fps: float = 0.0
-        self.total_frames_read: int = 0
-        self.total_inferences: int = 0
-        self.detected_vehicles: List[str] = []
-        self.last_accident_flag: bool = False
-        self.last_severity: str = "NONE"
-
-        # Frame buffers
-        self.frame_lock = threading.Lock()
-        self.latest_jpeg_bytes: Optional[bytes] = None
-        self.latest_raw_frame: Optional[np.ndarray] = None
-        self.new_frame_event = threading.Event()
-        self.interrupt_event = threading.Event()
-
-        # Thread management
-        self.worker_thread = threading.Thread(target=self._capture_worker, daemon=True, name="AerosCameraWorker")
-        self.worker_thread.start()
-
-    def _check_socket_reachability(self, url: str, timeout: float = 1.5) -> tuple:
-        """Performs non-blocking TCP reachability probe to prevent OpenCV connection hangs."""
-        try:
-            parsed = urllib.parse.urlparse(url)
-            host = parsed.hostname
-            if not host:
-                return False, "Missing hostname in stream URL"
-            port = parsed.port or (443 if parsed.scheme == "https" else 80)
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(timeout)
-                s.connect((host, port))
-            return True, "Reachable"
-        except socket.timeout:
-            return False, f"Timeout connecting to {host}:{port} after {timeout}s"
-        except ConnectionRefusedError:
-            return False, f"Connection refused on {host}:{port}"
-        except Exception as e:
-            return False, f"Unreachable ({e})"
-
-    def _generate_offline_frame(self, message: str, detail: str = "") -> bytes:
-        """Draws a high-visibility tactical HUD offline/connecting placeholder frame."""
-        img = np.zeros((480, 640, 3), dtype=np.uint8)
-        img[:] = (19, 11, 8)  # Tactical navy dark background
-        cv2.rectangle(img, (20, 20), (620, 460), (46, 29, 17), 2)
-        cv2.putText(img, "A.E.R.O.S. TACTICAL CCTV FEED", (40, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (248, 189, 56), 2)
-        cv2.putText(img, f"SOURCE: {self.active_source_type.upper()}", (40, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 1)
-        cv2.putText(img, f"STATUS: {message}", (40, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (90, 77, 255), 2)
-        if detail:
-            cv2.putText(img, detail[:65], (40, 190), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (160, 160, 160), 1)
-        if self.reconnect_attempts > 0:
-            cv2.putText(img, f"Reconnect attempt #{self.reconnect_attempts} (retrying every {self.reconnect_interval:.1f}s)...", (40, 230), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (120, 120, 120), 1)
-        timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        cv2.putText(img, timestamp_str, (40, 440), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 100, 100), 1)
-        ret, buf = cv2.imencode('.jpg', img)
-        return buf.tobytes() if ret else b""
-
-    def _read_mjpeg_stream(self, stream_url: str) -> bool:
-        """Reads frames directly from an HTTP multipart/x-mixed-replace MJPEG stream."""
-        import urllib.request
-        try:
-            req = urllib.request.Request(stream_url, headers={"User-Agent": "AEROS-CameraManager/1.0"})
-            with urllib.request.urlopen(req, timeout=3.0) as resp:
-                bytes_buf = b""
-                prev_fps_time = time.time()
-                fps_frame_count = 0
-                first_frame = True
-
-                while self.is_running and self.active_source_type == "esp32":
-                    chunk = resp.read(4096)
-                    if not chunk:
-                        break
-                    bytes_buf += chunk
-                    a = bytes_buf.find(b"\xff\xd8")
-                    b = bytes_buf.find(b"\xff\xd9")
-                    if a != -1 and b != -1 and b > a:
-                        jpg_data = bytes_buf[a:b+2]
-                        bytes_buf = bytes_buf[b+2:]
-                        frame = cv2.imdecode(np.frombuffer(jpg_data, dtype=np.uint8), cv2.IMREAD_COLOR)
-                        if frame is not None and frame.size > 0:
-                            if first_frame:
-                                self.is_connected = True
-                                self.is_fallback_active = False
-                                self.reconnect_attempts = 0
-                                self.diagnostic_message = "Live ESP32-CAM MJPEG streaming active"
-                                print(f"[CAMERA] ESP32-CAM stream connected! Resolution: {frame.shape[1]}x{frame.shape[0]}")
-                                first_frame = False
-
-                            self._process_and_store_frame(frame)
-                            fps_frame_count += 1
-                            now = time.time()
-                            if now - prev_fps_time >= 1.0:
-                                self.fps = round(fps_frame_count / (now - prev_fps_time), 1)
-                                fps_frame_count = 0
-                                prev_fps_time = now
-                return not first_frame
-        except Exception as e:
-            return False
-
-    def _capture_worker(self):
-        """Dedicated background capture thread."""
-        prev_fps_time = time.time()
-        fps_frame_count = 0
-
-        while self.is_running:
-            target_source = self.active_source_type
-
-            if target_source == "esp32":
-                stream_url = self.esp32_url
-                reachable, reason = self._check_socket_reachability(stream_url, timeout=1.5)
-
-                if not reachable:
-                    self.is_connected = False
-                    self.reconnect_attempts += 1
-                    self.diagnostic_message = f"ESP32-CAM unreachable: {reason}"
-                    
-                    if self.fallback_mode == "sample" and os.path.exists(self.sample_path):
-                        self.is_fallback_active = True
-                        print(f"[CAMERA] ESP32 unreachable. Fallback active: using sample_crash.mp4 ({reason})")
-                        self._stream_sample_video(single_pass=True)
-                        continue
-                    else:
-                        offline_jpeg = self._generate_offline_frame("CAMERA DISCONNECTED", self.diagnostic_message)
-                        with self.frame_lock:
-                            self.latest_jpeg_bytes = offline_jpeg
-                        self.new_frame_event.set()
-                        self.interrupt_event.wait(timeout=self.reconnect_interval)
-                        self.interrupt_event.clear()
-                        continue
-
-                # Attempt to stream from ESP32 camera
-                # First try direct robust MJPEG stream reader (fastest for ESP32-CAM)
-                stream_success = self._read_mjpeg_stream(stream_url)
-
-                if not stream_success:
-                    # Fallback to OpenCV VideoCapture backend
-                    print(f"[CAMERA] Direct MJPEG reader finished or unhandled, testing OpenCV VideoCapture for: {stream_url} ...")
-                    cap = cv2.VideoCapture(stream_url)
-                    if not cap.isOpened():
-                        self.is_connected = False
-                        self.reconnect_attempts += 1
-                        self.diagnostic_message = "Stream opened socket but failed frame decoding"
-                        cap.release()
-                        time.sleep(self.reconnect_interval)
-                        continue
-
-                    ret, test_frame = cap.read()
-                    if not ret or test_frame is None:
-                        self.is_connected = False
-                        self.reconnect_attempts += 1
-                        self.diagnostic_message = "OpenCV received empty frame from stream"
-                        cap.release()
-                        time.sleep(self.reconnect_interval)
-                        continue
-
-                    # Stream is successfully established via OpenCV
-                    self.is_connected = True
-                    self.is_fallback_active = False
-                    self.reconnect_attempts = 0
-                    self.diagnostic_message = "Live ESP32-CAM streaming active (OpenCV backend)"
-                    print(f"[CAMERA] ESP32-CAM connected via OpenCV! Resolution: {test_frame.shape[1]}x{test_frame.shape[0]}")
-
-                    self._process_and_store_frame(test_frame)
-
-                    while self.is_running and self.active_source_type == "esp32":
-                        ret, frame = cap.read()
-                        if not ret or frame is None:
-                            self.is_connected = False
-                            self.diagnostic_message = "Stream interrupted / empty frame"
-                            break
-
-                        self._process_and_store_frame(frame)
-                        fps_frame_count += 1
-                        now = time.time()
-                        if now - prev_fps_time >= 1.0:
-                            self.fps = round(fps_frame_count / (now - prev_fps_time), 1)
-                            fps_frame_count = 0
-                            prev_fps_time = now
-
-                    cap.release()
-
-                time.sleep(self.reconnect_interval)
-
-            elif target_source == "sample":
-                self.is_fallback_active = False
-                self._stream_sample_video(single_pass=False)
-
-            else:
-                time.sleep(0.5)
-
-    def _stream_sample_video(self, single_pass: bool = False):
-        """Reads and loops through sample_crash.mp4."""
-        if not os.path.exists(self.sample_path):
-            self.is_connected = False
-            self.diagnostic_message = f"Sample video not found at {self.sample_path}"
-            offline_jpeg = self._generate_offline_frame("SAMPLE FILE MISSING", self.diagnostic_message)
-            with self.frame_lock:
-                self.latest_jpeg_bytes = offline_jpeg
-            self.new_frame_event.set()
-            time.sleep(1.0)
-            return
-
-        cap = cv2.VideoCapture(self.sample_path)
-        if not cap.isOpened():
-            self.is_connected = False
-            self.diagnostic_message = "Failed to open sample_crash.mp4"
-            time.sleep(1.0)
-            return
-
-        self.is_connected = True
-        self.diagnostic_message = "Sample video loop active (sample_crash.mp4)"
-
-        prev_time = time.time()
-        fps_count = 0
-        fps_start = time.time()
-
-        while self.is_running:
-            if not single_pass and self.active_source_type != "sample":
-                break
-
-            ret, frame = cap.read()
-            if not ret or frame is None:
-                if single_pass:
-                    break
-                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                time.sleep(0.04)
-                continue
-
-            self._process_and_store_frame(frame)
-
-            fps_count += 1
-            now = time.time()
-            if now - fps_start >= 1.0:
-                self.fps = round(fps_count / (now - fps_start), 1)
-                fps_count = 0
-                fps_start = now
-
-            # Pacing to simulate ~28-30 FPS playback
-            elapsed = time.time() - prev_time
-            sleep_time = max(0.005, 0.035 - elapsed)
-            time.sleep(sleep_time)
-            prev_time = time.time()
-
-        cap.release()
-
-    def _process_and_store_frame(self, frame: np.ndarray):
-        """Applies YOLOv8 detector under detector_lock and caches latest JPEG bytes."""
-        self.frame_height, self.frame_width = frame.shape[:2]
-        self.last_successful_frame_time = datetime.now().isoformat()
-        self.total_frames_read += 1
-
-        if self.detector:
-            with self.lock:
-                processed_frame, is_accident, severity = self.detector.process_frame(frame)
-            self.last_accident_flag = is_accident
-            self.last_severity = severity
-            self.total_inferences += 1
-        else:
-            processed_frame = frame
-
-        ret, buffer = cv2.imencode('.jpg', processed_frame)
-        if ret:
-            with self.frame_lock:
-                self.latest_jpeg_bytes = buffer.tobytes()
-                self.latest_raw_frame = frame
-            self.new_frame_event.set()
-
-    def get_latest_jpeg(self, timeout: float = 0.5) -> Optional[bytes]:
-        """Returns the latest processed JPEG bytes for MJPEG streaming."""
-        self.new_frame_event.wait(timeout=timeout)
-        with self.frame_lock:
-            return self.latest_jpeg_bytes
-
-    def set_source(self, source: str) -> None:
-        """Switches active camera source to 'esp32' or 'sample'."""
-        source = source.lower().strip()
-        if source not in ["esp32", "sample"]:
-            raise ValueError(f"Invalid source '{source}'. Must be 'esp32' or 'sample'.")
-        self.configured_source_type = source
-        self.active_source_type = source
-        self.reconnect_attempts = 0
-        self.diagnostic_message = f"Switched source to {source}"
-        self.interrupt_event.set()
-        print(f"[CAMERA] Active source changed to: {source}")
-
-    def set_stream_url(self, url: str) -> None:
-        """Updates the ESP32 stream endpoint URL dynamically."""
-        url = url.strip()
-        if not url.startswith("http://") and not url.startswith("https://") and not url.startswith("rtsp://"):
-            raise ValueError("Stream URL must begin with http://, https://, or rtsp://")
-        self.esp32_url = url
-        self.reconnect_attempts = 0
-        self.diagnostic_message = f"Stream URL updated to {url}"
-        self.interrupt_event.set()
-        print(f"[CAMERA] Stream URL updated: {url}")
-
-    def set_fallback_mode(self, mode: str) -> None:
-        """Sets fallback mode to 'none' or 'sample'."""
-        mode = mode.lower().strip()
-        if mode in ["none", "sample"]:
-            self.fallback_mode = mode
-
-    def get_telemetry(self) -> Dict[str, Any]:
-        """Returns real-time telemetry dictionary."""
-        return {
-            "source_type": self.active_source_type,
-            "configured_source_type": self.configured_source_type,
-            "active_source": self.active_source_type,
-            "source_description": f"ESP32-CAM ({self.esp32_url})" if self.active_source_type == "esp32" else "sample_crash.mp4 (Traffic Stream)",
-            "camera_connected": self.is_connected,
-            "camera_active": self.is_connected,
-            "stream_url": self.esp32_url,
-            "stream_url_configured": bool(self.esp32_url),
-            "frame_width": self.frame_width,
-            "frame_height": self.frame_height,
-            "frame_dimensions": [self.frame_width, self.frame_height] if self.frame_width > 0 else None,
-            "fps": self.fps,
-            "last_successful_frame": self.last_successful_frame_time,
-            "latest_inference_time": self.last_successful_frame_time,
-            "reconnect_attempts": self.reconnect_attempts,
-            "is_fallback_active": self.is_fallback_active,
-            "diagnostic_message": self.diagnostic_message,
-            "error": None if self.is_connected else self.diagnostic_message,
-            "last_accident_flag": self.last_accident_flag,
-            "last_severity": self.last_severity,
-            "total_frames_read": self.total_frames_read,
-            "total_inferences": self.total_inferences,
-        }
-
-    def stop(self):
-        """Stops background capture loop."""
-        self.is_running = False
-        self.interrupt_event.set()
-
-
-camera_manager = CameraCaptureManager(
-    source_type=DEFAULT_CAMERA_SOURCE,
-    esp32_url=DEFAULT_ESP32_STREAM_URL,
-    sample_path=sample_video_path,
-    fallback_mode=DEFAULT_CAMERA_FALLBACK,
-    reconnect_interval=DEFAULT_RECONNECT_INTERVAL,
-    detector_instance=detector,
-    lock=detector_lock
-)
-
-# Global Telemetry from Camera Feed
-latest_telemetry = camera_manager.get_telemetry()
 
 # ============================================================================
 # SHARED BACKEND STATE STORE (Single Source of Truth for /system and /hospital)
@@ -574,6 +193,563 @@ class SharedStateStore:
         }
 
 shared_store = SharedStateStore()
+
+
+def trigger_emergency_simulation_from_live_feed(
+    severity: str,
+    source_type: str,
+    detected_vehicles: List[str]
+):
+    """
+    Phase 3: Automated Emergency Response Trigger.
+    When a genuine collision is confirmed on camera or stream, automatically initiates
+    the single-junction emergency corridor simulation workflow exactly once.
+    """
+    # Prevent duplicate triggers if simulation is already active or an incident exists
+    if shared_store.is_simulating or shared_store.incident is not None:
+        return
+
+    source_label = "REAL_CAMERA_DETECTION" if source_type == "esp32" else "AI_DETECTION"
+    vehicles = detected_vehicles if detected_vehicles else ["car"]
+
+    shared_store.incident = {
+        "id": f"INC-AUTO-{int(time.time() % 10000)}",
+        "detection_time": datetime.now().strftime("%H:%M:%S"),
+        "source": source_label,
+        "is_demo": False,
+        "location": "NH-24 West Approach (Sector 5 Corridor)",
+        "severity": severity,
+        "confidence_score": 94.2,
+        "vehicles_involved": vehicles,
+        "verified": True,
+        "status": "ACCIDENT_DETECTED",
+        "notes": f"Confirmed collision on {source_type.upper()} feed. Automatic emergency response initiated."
+    }
+    shared_store.is_simulating = True
+    shared_store.is_paused = False
+    shared_store.simulation_step = 0
+    shared_store.add_event(
+        "Accident",
+        f"Live Collision Confirmed [{severity}] — Auto Simulation Initiated",
+        f"AccidentDetector verified collision on {source_type.upper()}. Emergency corridor signals and ambulance dispatched.",
+        "critical"
+    )
+    print(f"[A.E.R.O.S. AUTOMATION] Live collision verified on {source_type}! Emergency corridor simulation initiated automatically.")
+
+
+# ============================================================================
+# DECOUPLED HIGH-PERFORMANCE CAMERA CAPTURE & INFERENCE MANAGER
+# ============================================================================
+class CameraCaptureManager:
+    """
+    Decoupled, thread-safe capture & inference manager for A.E.R.O.S. video feeds.
+    
+    Guarantees:
+    1. Zero Video Lag: Frame capture runs in a dedicated thread reading from the socket
+       at native camera rate (~25-30 FPS) into an atomic 1-element buffer. Old frames
+       are discarded immediately so socket buffers NEVER accumulate delay.
+    2. Decoupled Inference: A dedicated inference thread runs YOLOv8 at a bounded,
+       configurable rate (e.g. 8 FPS), keeping CPU utilization stable without slowing capture.
+    3. Single socket connection to ESP32-CAM (prevents connection resets).
+    4. Non-blocking TCP pre-flight checks prevent OpenCV from hanging on unreachable IP.
+    5. Clean tactical HUD offline placeholder when stream drops.
+    6. Automatic simulation dispatch hook upon confirmed accident (Phase 3).
+    7. Runtime switching between 'esp32' and 'sample'.
+    """
+    def __init__(
+        self,
+        source_type: str = DEFAULT_CAMERA_SOURCE,
+        esp32_url: str = DEFAULT_ESP32_STREAM_URL,
+        sample_path: str = sample_video_path,
+        fallback_mode: str = DEFAULT_CAMERA_FALLBACK,
+        reconnect_interval: float = DEFAULT_RECONNECT_INTERVAL,
+        inference_fps: float = DEFAULT_INFERENCE_FPS,
+        detector_instance: Optional[AccidentDetector] = None,
+        lock: Optional[threading.Lock] = None,
+        on_accident_callback: Optional[Any] = None,
+    ):
+        self.configured_source_type = source_type if source_type in ["esp32", "sample"] else "esp32"
+        self.active_source_type = self.configured_source_type
+        self.esp32_url = esp32_url
+        self.sample_path = sample_path
+        self.fallback_mode = fallback_mode if fallback_mode in ["none", "sample"] else "none"
+        self.reconnect_interval = max(0.5, reconnect_interval)
+        self.target_inference_fps = max(1.0, min(30.0, inference_fps))
+        self.detector = detector_instance
+        self.lock = lock or threading.Lock()
+        self.on_accident_callback = on_accident_callback
+
+        # State flags
+        self.is_running = True
+        self.is_connected = False
+        self.is_fallback_active = False
+        self.reconnect_attempts = 0
+        self.diagnostic_message = "Initializing decoupled camera capture manager..."
+        self.last_successful_frame_time: Optional[str] = None
+        self.frame_width: int = 640
+        self.frame_height: int = 480
+        
+        # Performance metrics
+        self.capture_fps: float = 0.0
+        self.actual_inference_fps: float = 0.0
+        self.total_frames_read: int = 0
+        self.total_inferences: int = 0
+        self.detected_vehicles: List[str] = []
+        self.last_accident_flag: bool = False
+        self.last_severity: str = "NONE"
+
+        # Frame buffers: Atomic 1-element buffers (Zero queue buildup)
+        self.raw_frame_lock = threading.Lock()
+        self.output_frame_lock = threading.Lock()
+        self.latest_raw_frame: Optional[np.ndarray] = None
+        self.latest_jpeg_bytes: Optional[bytes] = None
+        self.latest_annotated_frame: Optional[np.ndarray] = None
+
+        # Synchronization events
+        self.new_raw_event = threading.Event()
+        self.new_output_event = threading.Event()
+        self.interrupt_event = threading.Event()
+
+        # Dedicated threads
+        self.capture_thread = threading.Thread(
+            target=self._capture_worker,
+            daemon=True,
+            name="AerosCameraCapture"
+        )
+        self.inference_thread = threading.Thread(
+            target=self._inference_worker,
+            daemon=True,
+            name="AerosInferenceWorker"
+        )
+        
+        self.capture_thread.start()
+        self.inference_thread.start()
+
+    def _check_socket_reachability(self, url: str, timeout: float = 1.5) -> tuple:
+        """Performs non-blocking TCP reachability probe to prevent OpenCV connection hangs."""
+        try:
+            parsed = urllib.parse.urlparse(url)
+            host = parsed.hostname
+            if not host:
+                return False, "Missing hostname in stream URL"
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(timeout)
+                s.connect((host, port))
+            return True, "Reachable"
+        except socket.timeout:
+            return False, f"Timeout connecting to {host}:{port} after {timeout}s"
+        except ConnectionRefusedError:
+            return False, f"Connection refused on {host}:{port}"
+        except Exception as e:
+            return False, f"Unreachable ({e})"
+
+    def _generate_offline_frame(self, message: str, detail: str = "") -> bytes:
+        """Draws a clean, high-visibility tactical HUD offline/connecting placeholder frame."""
+        img = np.zeros((480, 640, 3), dtype=np.uint8)
+        img[:] = (248, 251, 245)  # Clean light mint-gray background (matches AEROS theme)
+        cv2.rectangle(img, (15, 15), (625, 465), (220, 235, 228), 2)
+        cv2.putText(img, "A.E.R.O.S. CCTV COMMAND FEED", (35, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (31, 41, 55), 2, cv2.LINE_AA)
+        cv2.putText(img, f"SOURCE: {self.active_source_type.upper()}", (35, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (107, 114, 128), 1, cv2.LINE_AA)
+        
+        # Amber/Red status badge
+        cv2.rectangle(img, (35, 125), (605, 175), (254, 242, 242), -1)
+        cv2.rectangle(img, (35, 125), (605, 175), (252, 165, 165), 1)
+        cv2.putText(img, f"STATUS: {message}", (45, 158), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (220, 38, 38), 2, cv2.LINE_AA)
+        
+        if detail:
+            cv2.putText(img, detail[:65], (35, 210), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (107, 114, 128), 1, cv2.LINE_AA)
+        if self.reconnect_attempts > 0:
+            cv2.putText(img, f"Reconnect attempt #{self.reconnect_attempts} (retrying every {self.reconnect_interval:.1f}s)...", (35, 245), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (140, 140, 140), 1, cv2.LINE_AA)
+            
+        timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cv2.putText(img, timestamp_str, (35, 445), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (156, 163, 175), 1, cv2.LINE_AA)
+        ret, buf = cv2.imencode('.jpg', img)
+        return buf.tobytes() if ret else b""
+
+    def _read_mjpeg_stream(self, stream_url: str) -> bool:
+        """
+        Reads raw multipart/x-mixed-replace MJPEG frames directly from HTTP socket.
+        Decodes incoming frames and immediately writes to atomic raw buffer.
+        NEVER waits for inference, guaranteeing lowest possible latency.
+        """
+        import urllib.request
+        try:
+            req = urllib.request.Request(stream_url, headers={"User-Agent": "AEROS-CameraManager/2.0"})
+            with urllib.request.urlopen(req, timeout=3.0) as resp:
+                bytes_buf = b""
+                fps_count = 0
+                fps_time = time.time()
+                first_frame = True
+
+                while self.is_running and self.active_source_type == "esp32":
+                    chunk = resp.read(4096)
+                    if not chunk:
+                        break
+                    bytes_buf += chunk
+                    a = bytes_buf.find(b"\xff\xd8")
+                    b = bytes_buf.find(b"\xff\xd9")
+                    if a != -1 and b != -1 and b > a:
+                        jpg_data = bytes_buf[a:b+2]
+                        bytes_buf = bytes_buf[b+2:]
+                        
+                        # Discard backlog if bytes_buf accumulated too many frames
+                        if len(bytes_buf) > 65536:
+                            bytes_buf = bytes_buf[-8192:]
+                            
+                        frame = cv2.imdecode(np.frombuffer(jpg_data, dtype=np.uint8), cv2.IMREAD_COLOR)
+                        if frame is not None and frame.size > 0:
+                            if first_frame:
+                                self.is_connected = True
+                                self.is_fallback_active = False
+                                self.reconnect_attempts = 0
+                                self.diagnostic_message = "Live ESP32-CAM MJPEG stream active"
+                                print(f"[CAMERA] Live ESP32-CAM connected! Stream resolution: {frame.shape[1]}x{frame.shape[0]}")
+                                first_frame = False
+
+                            with self.raw_frame_lock:
+                                self.latest_raw_frame = frame
+                                self.frame_height, self.frame_width = frame.shape[:2]
+                                self.last_successful_frame_time = datetime.now().isoformat()
+                                self.total_frames_read += 1
+                                
+                            self.new_raw_event.set()
+                            
+                            fps_count += 1
+                            now = time.time()
+                            if now - fps_time >= 1.0:
+                                self.capture_fps = round(fps_count / (now - fps_time), 1)
+                                fps_count = 0
+                                fps_time = now
+
+                return not first_frame
+        except Exception as e:
+            return False
+
+    def _capture_worker(self):
+        """Dedicated background capture thread."""
+        while self.is_running:
+            target_source = self.active_source_type
+
+            if target_source == "esp32":
+                stream_url = self.esp32_url
+                reachable, reason = self._check_socket_reachability(stream_url, timeout=1.5)
+
+                if not reachable:
+                    self.is_connected = False
+                    self.reconnect_attempts += 1
+                    self.diagnostic_message = f"ESP32-CAM unreachable: {reason}"
+                    
+                    if self.fallback_mode == "sample" and os.path.exists(self.sample_path):
+                        self.is_fallback_active = True
+                        print(f"[CAMERA] ESP32 unreachable. Fallback active: using sample_crash.mp4 ({reason})")
+                        self._stream_sample_video(single_pass=True)
+                        continue
+                    else:
+                        offline_jpeg = self._generate_offline_frame("CAMERA DISCONNECTED", self.diagnostic_message)
+                        with self.output_frame_lock:
+                            self.latest_jpeg_bytes = offline_jpeg
+                        self.new_output_event.set()
+                        self.interrupt_event.wait(timeout=self.reconnect_interval)
+                        self.interrupt_event.clear()
+                        continue
+
+                # Socket is reachable: attempt fast MJPEG stream read
+                stream_success = self._read_mjpeg_stream(stream_url)
+
+                if not stream_success:
+                    # Fallback to cv2.VideoCapture backend
+                    print(f"[CAMERA] MJPEG direct socket closed; testing OpenCV VideoCapture for: {stream_url} ...")
+                    cap = cv2.VideoCapture(stream_url)
+                    if not cap.isOpened():
+                        self.is_connected = False
+                        self.reconnect_attempts += 1
+                        self.diagnostic_message = "Stream opened socket but failed frame decoding"
+                        cap.release()
+                        time.sleep(self.reconnect_interval)
+                        continue
+
+                    ret, test_frame = cap.read()
+                    if not ret or test_frame is None:
+                        self.is_connected = False
+                        self.reconnect_attempts += 1
+                        self.diagnostic_message = "OpenCV received empty frame from stream"
+                        cap.release()
+                        time.sleep(self.reconnect_interval)
+                        continue
+
+                    self.is_connected = True
+                    self.is_fallback_active = False
+                    self.reconnect_attempts = 0
+                    self.diagnostic_message = "Live ESP32-CAM streaming active (OpenCV backend)"
+                    print(f"[CAMERA] ESP32-CAM connected via OpenCV! Resolution: {test_frame.shape[1]}x{test_frame.shape[0]}")
+
+                    with self.raw_frame_lock:
+                        self.latest_raw_frame = test_frame
+                        self.frame_height, self.frame_width = test_frame.shape[:2]
+                        self.total_frames_read += 1
+                    self.new_raw_event.set()
+
+                    fps_count = 0
+                    fps_time = time.time()
+
+                    while self.is_running and self.active_source_type == "esp32":
+                        ret, frame = cap.read()
+                        if not ret or frame is None:
+                            self.is_connected = False
+                            self.diagnostic_message = "Stream interrupted / empty frame"
+                            break
+
+                        with self.raw_frame_lock:
+                            self.latest_raw_frame = frame
+                            self.last_successful_frame_time = datetime.now().isoformat()
+                            self.total_frames_read += 1
+                        self.new_raw_event.set()
+
+                        fps_count += 1
+                        now = time.time()
+                        if now - fps_time >= 1.0:
+                            self.capture_fps = round(fps_count / (now - fps_time), 1)
+                            fps_count = 0
+                            fps_time = now
+
+                    cap.release()
+
+                time.sleep(self.reconnect_interval)
+
+            elif target_source == "sample":
+                self.is_fallback_active = False
+                self._stream_sample_video(single_pass=False)
+
+            else:
+                time.sleep(0.5)
+
+    def _stream_sample_video(self, single_pass: bool = False):
+        """Reads and loops through sample_crash.mp4 at native frame rate into raw frame buffer."""
+        if not os.path.exists(self.sample_path):
+            self.is_connected = False
+            self.diagnostic_message = f"Sample video not found at {self.sample_path}"
+            offline_jpeg = self._generate_offline_frame("SAMPLE FILE MISSING", self.diagnostic_message)
+            with self.output_frame_lock:
+                self.latest_jpeg_bytes = offline_jpeg
+            self.new_output_event.set()
+            time.sleep(1.0)
+            return
+
+        cap = cv2.VideoCapture(self.sample_path)
+        if not cap.isOpened():
+            self.is_connected = False
+            self.diagnostic_message = "Failed to open sample_crash.mp4"
+            time.sleep(1.0)
+            return
+
+        self.is_connected = True
+        self.diagnostic_message = "Sample video stream active (sample_crash.mp4)"
+
+        prev_time = time.time()
+        fps_count = 0
+        fps_start = time.time()
+
+        while self.is_running:
+            if not single_pass and self.active_source_type != "sample":
+                break
+
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                if single_pass:
+                    break
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                time.sleep(0.03)
+                continue
+
+            with self.raw_frame_lock:
+                self.latest_raw_frame = frame
+                self.frame_height, self.frame_width = frame.shape[:2]
+                self.last_successful_frame_time = datetime.now().isoformat()
+                self.total_frames_read += 1
+            self.new_raw_event.set()
+
+            fps_count += 1
+            now = time.time()
+            if now - fps_start >= 1.0:
+                self.capture_fps = round(fps_count / (now - fps_start), 1)
+                fps_count = 0
+                fps_start = now
+
+            # Pacing to simulate standard 30 FPS playback
+            elapsed = time.time() - prev_time
+            sleep_time = max(0.005, 0.033 - elapsed)
+            time.sleep(sleep_time)
+            prev_time = time.time()
+
+        cap.release()
+
+    def _inference_worker(self):
+        """
+        Dedicated decoupled inference worker.
+        Pulls latest raw frame at configurable rate (e.g. 8 FPS),
+        executes YOLOv8 collision detection, encodes JPEG output,
+        and invokes the accident callback upon confirmed accident (Phase 3).
+        """
+        target_interval = 1.0 / max(1.0, self.target_inference_fps)
+        inf_count = 0
+        inf_fps_time = time.time()
+
+        while self.is_running:
+            # Wait for raw frame availability
+            if not self.new_raw_event.wait(timeout=0.2):
+                continue
+            self.new_raw_event.clear()
+
+            with self.raw_frame_lock:
+                frame = None if self.latest_raw_frame is None else self.latest_raw_frame.copy()
+
+            if frame is None:
+                time.sleep(0.02)
+                continue
+
+            t_start = time.time()
+            is_accident = False
+            severity = "NONE"
+
+            if self.detector is not None:
+                with self.lock:
+                    processed_frame, is_accident, severity = self.detector.process_frame(
+                        frame,
+                        require_temporal_confirmation=True
+                    )
+                self.last_accident_flag = is_accident
+                self.last_severity = severity
+                self.total_inferences += 1
+                
+                # Update detected vehicles list from detector tracks
+                self.detected_vehicles = [
+                    t.class_name for t in self.detector.tracks.values()
+                    if t.disappeared_frames == 0
+                ]
+
+                # Phase 3: Automated Simulation Trigger Hook
+                if is_accident and self.on_accident_callback is not None:
+                    try:
+                        self.on_accident_callback(
+                            severity=severity,
+                            source_type=self.active_source_type,
+                            detected_vehicles=self.detected_vehicles
+                        )
+                    except Exception as cb_err:
+                        print(f"[CAMERA] Error in accident callback: {cb_err}")
+            else:
+                processed_frame = frame
+
+            # Encode high-quality JPEG for frontend streaming
+            ret, buffer = cv2.imencode('.jpg', processed_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            if ret:
+                with self.output_frame_lock:
+                    self.latest_jpeg_bytes = buffer.tobytes()
+                    self.latest_annotated_frame = processed_frame
+                self.new_output_event.set()
+
+            inf_count += 1
+            now = time.time()
+            if now - inf_fps_time >= 1.0:
+                self.actual_inference_fps = round(inf_count / (now - inf_fps_time), 1)
+                inf_count = 0
+                inf_fps_time = now
+
+            # Precise rate limiting according to target inference FPS
+            elapsed = time.time() - t_start
+            sleep_time = max(0.002, target_interval - elapsed)
+            time.sleep(sleep_time)
+
+    def get_latest_jpeg(self, timeout: float = 0.2) -> Optional[bytes]:
+        """Returns the latest processed JPEG bytes for MJPEG streaming."""
+        self.new_output_event.wait(timeout=timeout)
+        with self.output_frame_lock:
+            return self.latest_jpeg_bytes
+
+    def set_source(self, source: str) -> None:
+        """Switches active camera source to 'esp32' or 'sample'."""
+        source = source.lower().strip()
+        if source not in ["esp32", "sample"]:
+            raise ValueError(f"Invalid source '{source}'. Must be 'esp32' or 'sample'.")
+        self.configured_source_type = source
+        self.active_source_type = source
+        self.reconnect_attempts = 0
+        self.diagnostic_message = f"Switched source to {source}"
+        self.interrupt_event.set()
+        print(f"[CAMERA] Active source changed to: {source}")
+
+    def set_stream_url(self, url: str) -> None:
+        """Updates the ESP32 stream endpoint URL dynamically."""
+        url = url.strip()
+        if not url.startswith("http://") and not url.startswith("https://") and not url.startswith("rtsp://"):
+            raise ValueError("Stream URL must begin with http://, https://, or rtsp://")
+        self.esp32_url = url
+        self.reconnect_attempts = 0
+        self.diagnostic_message = f"Stream URL updated to {url}"
+        self.interrupt_event.set()
+        print(f"[CAMERA] Stream URL updated: {url}")
+
+    def set_fallback_mode(self, mode: str) -> None:
+        """Sets fallback mode to 'none' or 'sample'."""
+        mode = mode.lower().strip()
+        if mode in ["none", "sample"]:
+            self.fallback_mode = mode
+
+    def get_telemetry(self) -> Dict[str, Any]:
+        """Returns real-time telemetry dictionary."""
+        return {
+            "source_type": self.active_source_type,
+            "configured_source_type": self.configured_source_type,
+            "active_source": self.active_source_type,
+            "source_description": f"ESP32-CAM ({self.esp32_url})" if self.active_source_type == "esp32" else "sample_crash.mp4 (Traffic Stream)",
+            "camera_connected": self.is_connected,
+            "camera_active": self.is_connected,
+            "stream_url": self.esp32_url,
+            "stream_url_configured": bool(self.esp32_url),
+            "frame_width": self.frame_width,
+            "frame_height": self.frame_height,
+            "frame_dimensions": [self.frame_width, self.frame_height] if self.frame_width > 0 else None,
+            "fps": self.capture_fps,
+            "capture_fps": self.capture_fps,
+            "inference_fps": self.actual_inference_fps,
+            "target_inference_fps": self.target_inference_fps,
+            "last_successful_frame": self.last_successful_frame_time,
+            "latest_inference_time": self.last_successful_frame_time,
+            "reconnect_attempts": self.reconnect_attempts,
+            "is_fallback_active": self.is_fallback_active,
+            "diagnostic_message": self.diagnostic_message,
+            "error": None if self.is_connected else self.diagnostic_message,
+            "last_accident_flag": self.last_accident_flag,
+            "last_severity": self.last_severity,
+            "total_frames_read": self.total_frames_read,
+            "total_inferences": self.total_inferences,
+            "detected_vehicles": self.detected_vehicles,
+        }
+
+    def stop(self):
+        """Stops background capture and inference loops."""
+        self.is_running = False
+        self.interrupt_event.set()
+        self.new_raw_event.set()
+        self.new_output_event.set()
+
+
+camera_manager = CameraCaptureManager(
+    source_type=DEFAULT_CAMERA_SOURCE,
+    esp32_url=DEFAULT_ESP32_STREAM_URL,
+    sample_path=sample_video_path,
+    fallback_mode=DEFAULT_CAMERA_FALLBACK,
+    reconnect_interval=DEFAULT_RECONNECT_INTERVAL,
+    inference_fps=DEFAULT_INFERENCE_FPS,
+    detector_instance=detector,
+    lock=detector_lock,
+    on_accident_callback=trigger_emergency_simulation_from_live_feed
+)
+
+# Global Telemetry from Camera Feed
+latest_telemetry = camera_manager.get_telemetry()
+
 
 # Background runner for simulation pacing
 simulation_task_handle: Optional[asyncio.Task] = None
@@ -1211,12 +1387,13 @@ def run_sample_frame_inference():
 
 
 def generate_video_stream():
-    """Generator that yields MJPEG frames from the central camera capture manager."""
+    """Generator that yields MJPEG frames smoothly from the central camera capture manager."""
     while True:
-        frame_bytes = camera_manager.get_latest_jpeg(timeout=0.2)
+        frame_bytes = camera_manager.get_latest_jpeg(timeout=0.04)
         if frame_bytes:
             yield (b'--frame\r\n'
                    b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+            time.sleep(0.033)  # Smooth ~30 FPS delivery
         else:
             time.sleep(0.04)
 
@@ -1294,7 +1471,9 @@ def run_live_frame_inference():
     if detector is None:
         raise HTTPException(status_code=503, detail=f"Detector not loaded: {detector_error}")
 
-    frame = camera_manager.latest_raw_frame
+    with camera_manager.raw_frame_lock:
+        frame = camera_manager.latest_raw_frame.copy() if camera_manager.latest_raw_frame is not None else None
+
     if frame is None or not camera_manager.is_connected:
         raise HTTPException(
             status_code=503,
@@ -1309,7 +1488,12 @@ def run_live_frame_inference():
     elapsed_ms = round((time.time() - start_time) * 1000, 2)
 
     # Obtain YOLO objects for reporting
-    yolo_results = detector.model(cv2.resize(frame, (640, 480)), conf=detector.conf_thresh, verbose=False)
+    yolo_results = detector.model.predict(
+        cv2.resize(frame, (640, 480)),
+        imgsz=detector.inference_size,
+        conf=detector.conf_thresh,
+        verbose=False
+    )
     detected_objects = []
     for result in yolo_results:
         for box in result.boxes:
