@@ -53,9 +53,16 @@ export async function resetSimulationApi(): Promise<SharedSimulationState> {
   return await res.json();
 }
 
-export async function createDemoIncidentApi(): Promise<SharedSimulationState> {
-  const res = await fetch(`${API_BASE}/simulation/demo-incident`, { method: 'POST' });
+export async function createDemoIncidentApi(dispatch: boolean = false): Promise<SharedSimulationState> {
+  const url = dispatch ? `${API_BASE}/simulation/demo-incident?dispatch=true` : `${API_BASE}/simulation/demo-incident`;
+  const res = await fetch(url, { method: 'POST' });
   if (!res.ok) throw new Error('Failed to create demo incident');
+  return await res.json();
+}
+
+export async function triggerEmergencyOverrideApi(): Promise<SharedSimulationState> {
+  const res = await fetch(`${API_BASE}/simulation/emergency-override`, { method: 'POST' });
+  if (!res.ok) throw new Error('Failed to trigger emergency override');
   return await res.json();
 }
 

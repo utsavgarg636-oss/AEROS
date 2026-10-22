@@ -28,6 +28,12 @@ export const LiveRoadFeedCard: React.FC = () => {
   const cameraComp = systemStatus?.components?.camera;
   const isEsp32 = cameraComp?.source_type === 'esp32';
 
+  // Direct backend connection in local environment to bypass Node.js dev-server proxy buffer latency
+  const videoFeedUrl = 
+    typeof window !== 'undefined' && (window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost')
+      ? 'http://127.0.0.1:8000/api/video_feed'
+      : '/api/video_feed';
+
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -91,10 +97,17 @@ export const LiveRoadFeedCard: React.FC = () => {
             />
           ) : streamActive && backendConnected ? (
             <img 
-              src="/api/video_feed" 
+              src={videoFeedUrl} 
               alt="CCTV Video Feed" 
               className="w-full h-full object-contain"
-              onError={() => setStreamActive(false)}
+              onError={(e) => {
+                const target = e.currentTarget;
+                if (target.src.includes(':8000/api/video_feed')) {
+                  target.src = '/api/video_feed';
+                } else {
+                  setStreamActive(false);
+                }
+              }}
             />
           ) : (
             <div className="flex flex-col items-center justify-center p-6 text-center text-slate-400">
@@ -103,8 +116,8 @@ export const LiveRoadFeedCard: React.FC = () => {
             </div>
           )}
 
-          {/* Overlay Bounding Boxes Simulation overlay if feed is running in sample mode */}
-          {(!latestInference?.annotated_image && incident) && (
+          {/* Overlay Bounding Boxes Simulation overlay if feed is running in sample demo mode */}
+          {(!latestInference?.annotated_image && !isEsp32 && incident?.is_demo) && (
             <div className="absolute inset-0 pointer-events-none">
               {/* Top Car Box */}
               <div className="absolute top-[16%] left-[32%] w-16 h-14 border-2 border-[#00E676] rounded text-[9px] font-bold text-[#00E676] px-1 bg-[#00E676]/10">

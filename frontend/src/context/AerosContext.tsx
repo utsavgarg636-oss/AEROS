@@ -19,6 +19,7 @@ import {
   resumeSimulationApi, 
   resetSimulationApi, 
   createDemoIncidentApi, 
+  triggerEmergencyOverrideApi,
   hospitalAcknowledgeApi, 
   hospitalMarkArrivedApi, 
   runImageInference as apiRunImageInference, 
@@ -125,6 +126,7 @@ interface AerosContextType {
   resumeSimulation: () => Promise<void>;
   resetSimulation: () => Promise<void>;
   createDemoIncident: () => Promise<void>;
+  triggerEmergencyOverride: () => Promise<void>;
   togglePrioritySwitch: (active?: boolean) => Promise<void>;
   updatePatientVitals: (data: { heart_rate?: number; bpm?: number; temperature?: number; spo2?: number }) => Promise<void>;
   acknowledgeHospitalCase: () => Promise<void>;
@@ -213,25 +215,8 @@ export const AerosProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     };
   }, [refreshState]);
 
-  // ==========================================
-  // KEYBOARD OVERRIDE LISTENER (KEY 'A' SHORTCUT)
-  // ==========================================
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'a' || event.key === 'A') {
-        console.warn("EMERGENCY OVERRIDE TRIGGERED VIA KEY 'A'");
-        createDemoIncident();
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => {
-      window.removeEventListener('keydown', handleKeyDown);
-    };
-  }, [createDemoIncident]);
-
   // Simulation controls
-  const startSimulation = async () => {
+  const startSimulation = useCallback(async () => {
     try {
       const updated = await startSimulationApi();
       setSharedState(updated);
@@ -251,12 +236,97 @@ export const AerosProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           confidence_score: 93.0,
           vehicles_involved: ['car', 'truck'],
           verified: true,
-          status: 'ACCIDENT_DETECTED',
+          status: 'AMBULANCE_DISPATCHED',
           notes: 'Simulated multi-vehicle collision for demonstration.'
+        },
+        ambulance: {
+          ...prev.ambulance,
+          status: 'EN_ROUTE_JUNCTION',
+          progress: 10,
+          assigned_incident_id: 'INC-DEMO-2026'
+        },
+        hospital: {
+          ...prev.hospital,
+          assigned_case_id: 'INC-DEMO-2026',
+          arrival_status: 'IN_TRANSIT'
         }
       }));
     }
-  };
+  }, []);
+
+  // Emergency Fallback: Triggered via Key 'A' Shortcut or Button
+  const triggerEmergencyOverride = useCallback(async () => {
+    console.warn("EMERGENCY OVERRIDE TRIGGERED: ACCIDENT DETECTED & AMBULANCE DISPATCHED");
+    try {
+      const updated = await triggerEmergencyOverrideApi();
+      setSharedState(updated);
+    } catch {
+      try {
+        const updated = await startSimulationApi();
+        setSharedState(updated);
+      } catch {
+        // Fully offline fallback simulation
+        setSharedState(prev => ({
+          ...prev,
+          is_simulating: true,
+          is_paused: false,
+          simulation_step: 1,
+          incident: {
+            id: `INC-FALLBACK-${Math.floor(Date.now() % 10000)}`,
+            detection_time: new Date().toLocaleTimeString(),
+            source: 'MANUAL_KEYBOARD_FALLBACK_A',
+            is_demo: true,
+            location: 'NH-24 West Approach (Sector 5 Corridor)',
+            severity: 'HIGH',
+            confidence_score: 99.0,
+            vehicles_involved: ['car', 'truck'],
+            verified: true,
+            status: 'AMBULANCE_DISPATCHED',
+            notes: 'Emergency fallback triggered via shortcut [A]. Corridor dispatched immediately.'
+          },
+          ambulance: {
+            ...prev.ambulance,
+            status: 'EN_ROUTE_JUNCTION',
+            progress: 10,
+            assigned_incident_id: 'INC-FALLBACK'
+          },
+          hospital: {
+            ...prev.hospital,
+            assigned_case_id: 'INC-FALLBACK',
+            arrival_status: 'IN_TRANSIT'
+          }
+        }));
+      }
+    }
+  }, []);
+
+  // ==========================================
+  // KEYBOARD OVERRIDE LISTENER (KEY 'A' SHORTCUT)
+  // ==========================================
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      // Ignore if typing in text inputs or editable elements
+      const target = event.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+
+      if (event.key === 'a' || event.key === 'A') {
+        event.preventDefault();
+        triggerEmergencyOverride();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [triggerEmergencyOverride]);
 
   const pauseSimulation = async () => {
     try {
@@ -431,6 +501,7 @@ export const AerosProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         resumeSimulation,
         resetSimulation,
         createDemoIncident,
+        triggerEmergencyOverride,
         togglePrioritySwitch,
         updatePatientVitals,
         acknowledgeHospitalCase,

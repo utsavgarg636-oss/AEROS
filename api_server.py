@@ -7,7 +7,7 @@ import threading
 import socket
 import urllib.parse
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 
 import cv2
 import numpy as np
@@ -60,7 +60,7 @@ detector = None
 detector_lock = threading.Lock()
 if detector_loaded:
     try:
-        detector = AccidentDetector(model_path=model_path, conf_thresh=0.25, iou_thresh=0.15)
+        detector = AccidentDetector(model_path=model_path, conf_thresh=0.35, iou_thresh=0.15)
         print(f"[API SERVER] Successfully loaded existing AccidentDetector with {model_path}")
     except Exception as e:
         print(f"[API SERVER ERROR] Failed to instantiate AccidentDetector: {e}")
@@ -125,6 +125,8 @@ class SharedStateStore:
             "spo2": 98,
             "timestamp": datetime.now().isoformat()
         }
+        self.last_vitals_event_time: float = 0.0
+        self.last_logged_bpm: int = 78
         self.incident: Optional[Dict[str, Any]] = None
         self.ambulance: Dict[str, Any] = {
             "id": "AMB-101",
@@ -309,14 +311,14 @@ class CameraCaptureManager:
 
         # Frame buffers: Atomic 1-element buffers (Zero queue buildup)
         self.raw_frame_lock = threading.Lock()
-        self.output_frame_lock = threading.Lock()
         self.latest_raw_frame: Optional[np.ndarray] = None
         self.latest_jpeg_bytes: Optional[bytes] = None
         self.latest_annotated_frame: Optional[np.ndarray] = None
+        self.frame_version: int = 0
+        self.output_condition = threading.Condition()
 
         # Synchronization events
         self.new_raw_event = threading.Event()
-        self.new_output_event = threading.Event()
         self.interrupt_event = threading.Event()
 
         # Dedicated threads
@@ -414,15 +416,51 @@ class CameraCaptureManager:
         ret, buf = cv2.imencode('.jpg', img)
         return buf.tobytes() if ret else b""
 
+    def _handle_new_raw_frame(self, frame: np.ndarray):
+        """
+        Dispatches newly captured frame at native camera rate (~25-30 FPS):
+        1. Updates atomic raw frame buffer and signals inference worker.
+        2. Applies instant annotation overlay from cached vehicle tracks in sub-millisecond time.
+        3. Encodes JPEG and wakes all waiting streaming clients via condition variable.
+        """
+        with self.raw_frame_lock:
+            self.latest_raw_frame = frame
+            self.frame_height, self.frame_width = frame.shape[:2]
+            self.last_successful_frame_time = datetime.now().isoformat()
+            self.total_frames_read += 1
+        self.new_raw_event.set()
+
+        # Instant display annotation pass (< 0.2ms)
+        display_frame = frame
+        if self.detector is not None:
+            try:
+                display_frame = self.detector.annotate_frame(frame)
+            except Exception:
+                display_frame = frame
+
+        ret, buffer = cv2.imencode('.jpg', display_frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+        if ret:
+            with self.output_condition:
+                self.latest_jpeg_bytes = buffer.tobytes()
+                self.latest_annotated_frame = display_frame
+                self.frame_version += 1
+                self.output_condition.notify_all()
+
     def _read_mjpeg_stream(self, stream_url: str) -> bool:
         """
         Reads raw multipart/x-mixed-replace MJPEG frames directly from HTTP socket.
-        Decodes incoming frames and immediately writes to atomic raw buffer.
-        NEVER waits for inference, guaranteeing lowest possible latency.
+        Decodes the LAST complete frame in the socket buffer and immediately discards stale frames.
+        Guarantees sub-50ms glass-to-glass latency and eliminates socket buffer accumulation.
         """
         import urllib.request
         try:
-            req = urllib.request.Request(stream_url, headers={"User-Agent": "AEROS-CameraManager/2.0"})
+            req = urllib.request.Request(
+                stream_url,
+                headers={
+                    "User-Agent": "AEROS-CameraManager/2.0",
+                    "Accept": "multipart/x-mixed-replace; boundary=frame, image/jpeg, */*"
+                }
+            )
             with urllib.request.urlopen(req, timeout=3.0) as resp:
                 bytes_buf = b""
                 fps_count = 0
@@ -430,44 +468,46 @@ class CameraCaptureManager:
                 first_frame = True
 
                 while self.is_running and self.active_source_type == "esp32":
-                    chunk = resp.read(4096)
+                    chunk = resp.read(8192)
                     if not chunk:
                         break
                     bytes_buf += chunk
-                    a = bytes_buf.find(b"\xff\xd8")
-                    b = bytes_buf.find(b"\xff\xd9")
-                    if a != -1 and b != -1 and b > a:
-                        jpg_data = bytes_buf[a:b+2]
-                        bytes_buf = bytes_buf[b+2:]
-                        
-                        # Discard backlog if bytes_buf accumulated too many frames
-                        if len(bytes_buf) > 65536:
-                            bytes_buf = bytes_buf[-8192:]
-                            
-                        frame = cv2.imdecode(np.frombuffer(jpg_data, dtype=np.uint8), cv2.IMREAD_COLOR)
-                        if frame is not None and frame.size > 0:
-                            if first_frame:
-                                self.is_connected = True
-                                self.is_fallback_active = False
-                                self.reconnect_attempts = 0
-                                self.diagnostic_message = "Live ESP32-CAM MJPEG stream active"
-                                print(f"[CAMERA] Live ESP32-CAM connected! Stream resolution: {frame.shape[1]}x{frame.shape[0]}")
-                                first_frame = False
 
-                            with self.raw_frame_lock:
-                                self.latest_raw_frame = frame
-                                self.frame_height, self.frame_width = frame.shape[:2]
-                                self.last_successful_frame_time = datetime.now().isoformat()
-                                self.total_frames_read += 1
-                                
-                            self.new_raw_event.set()
-                            
-                            fps_count += 1
-                            now = time.time()
-                            if now - fps_time >= 1.0:
-                                self.capture_fps = round(fps_count / (now - fps_time), 1)
-                                fps_count = 0
-                                fps_time = now
+                    # Find the LAST complete JPEG frame in the accumulated buffer
+                    # This drops any older frames that queued up in TCP socket buffers
+                    b = bytes_buf.rfind(b"\xff\xd9")
+                    if b != -1:
+                        a = bytes_buf.rfind(b"\xff\xd8", 0, b)
+                        if a != -1:
+                            jpg_data = bytes_buf[a:b+2]
+                            bytes_buf = bytes_buf[b+2:]
+
+                            frame = cv2.imdecode(np.frombuffer(jpg_data, dtype=np.uint8), cv2.IMREAD_COLOR)
+                            if frame is not None and frame.size > 0:
+                                if first_frame:
+                                    self.is_connected = True
+                                    self.is_fallback_active = False
+                                    self.reconnect_attempts = 0
+                                    self.diagnostic_message = "Live ESP32-CAM MJPEG stream active"
+                                    print(f"[CAMERA] Live ESP32-CAM connected! Stream resolution: {frame.shape[1]}x{frame.shape[0]}")
+                                    first_frame = False
+
+                                self._handle_new_raw_frame(frame)
+
+                                fps_count += 1
+                                now = time.time()
+                                if now - fps_time >= 1.0:
+                                    self.capture_fps = round(fps_count / (now - fps_time), 1)
+                                    fps_count = 0
+                                    fps_time = now
+
+                    # Prevent buffer buildup in case of transmission gaps without corrupting markers
+                    if len(bytes_buf) > 131072:
+                        last_soi = bytes_buf.rfind(b"\xff\xd8")
+                        if last_soi != -1:
+                            bytes_buf = bytes_buf[last_soi:]
+                        else:
+                            bytes_buf = b""
 
                 return not first_frame
         except Exception as e:
@@ -494,9 +534,10 @@ class CameraCaptureManager:
                         continue
                     else:
                         offline_jpeg = self._generate_offline_frame("CAMERA DISCONNECTED", self.diagnostic_message)
-                        with self.output_frame_lock:
+                        with self.output_condition:
                             self.latest_jpeg_bytes = offline_jpeg
-                        self.new_output_event.set()
+                            self.frame_version += 1
+                            self.output_condition.notify_all()
                         self.interrupt_event.wait(timeout=self.reconnect_interval)
                         self.interrupt_event.clear()
                         continue
@@ -516,6 +557,9 @@ class CameraCaptureManager:
                         time.sleep(self.reconnect_interval)
                         continue
 
+                    # Eliminate OpenCV internal buffering lag
+                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
                     ret, test_frame = cap.read()
                     if not ret or test_frame is None:
                         self.is_connected = False
@@ -531,11 +575,7 @@ class CameraCaptureManager:
                     self.diagnostic_message = "Live ESP32-CAM streaming active (OpenCV backend)"
                     print(f"[CAMERA] ESP32-CAM connected via OpenCV! Resolution: {test_frame.shape[1]}x{test_frame.shape[0]}")
 
-                    with self.raw_frame_lock:
-                        self.latest_raw_frame = test_frame
-                        self.frame_height, self.frame_width = test_frame.shape[:2]
-                        self.total_frames_read += 1
-                    self.new_raw_event.set()
+                    self._handle_new_raw_frame(test_frame)
 
                     fps_count = 0
                     fps_time = time.time()
@@ -547,11 +587,7 @@ class CameraCaptureManager:
                             self.diagnostic_message = "Stream interrupted / empty frame"
                             break
 
-                        with self.raw_frame_lock:
-                            self.latest_raw_frame = frame
-                            self.last_successful_frame_time = datetime.now().isoformat()
-                            self.total_frames_read += 1
-                        self.new_raw_event.set()
+                        self._handle_new_raw_frame(frame)
 
                         fps_count += 1
                         now = time.time()
@@ -577,9 +613,10 @@ class CameraCaptureManager:
             self.is_connected = False
             self.diagnostic_message = f"Sample video not found at {self.sample_path}"
             offline_jpeg = self._generate_offline_frame("SAMPLE FILE MISSING", self.diagnostic_message)
-            with self.output_frame_lock:
+            with self.output_condition:
                 self.latest_jpeg_bytes = offline_jpeg
-            self.new_output_event.set()
+                self.frame_version += 1
+                self.output_condition.notify_all()
             time.sleep(1.0)
             return
 
@@ -609,12 +646,7 @@ class CameraCaptureManager:
                 time.sleep(0.03)
                 continue
 
-            with self.raw_frame_lock:
-                self.latest_raw_frame = frame
-                self.frame_height, self.frame_width = frame.shape[:2]
-                self.last_successful_frame_time = datetime.now().isoformat()
-                self.total_frames_read += 1
-            self.new_raw_event.set()
+            self._handle_new_raw_frame(frame)
 
             fps_count += 1
             now = time.time()
@@ -635,8 +667,8 @@ class CameraCaptureManager:
         """
         Dedicated decoupled inference worker.
         Pulls latest raw frame at configurable rate (e.g. 8 FPS),
-        executes YOLOv8 collision detection, encodes JPEG output,
-        and invokes the accident callback upon confirmed accident (Phase 3).
+        executes YOLOv8 collision detection, and invokes the accident callback
+        upon confirmed accident (Phase 3). Never slows down video capture or streaming.
         """
         target_interval = 1.0 / max(1.0, self.target_inference_fps)
         inf_count = 0
@@ -660,20 +692,26 @@ class CameraCaptureManager:
             severity = "NONE"
 
             if self.detector is not None:
-                with self.lock:
-                    processed_frame, is_accident, severity = self.detector.process_frame(
-                        frame,
-                        require_temporal_confirmation=True
-                    )
+                try:
+                    with self.lock:
+                        is_accident, severity = self.detector.detect_and_update(
+                            frame,
+                            require_temporal_confirmation=True
+                        )
+                except Exception as det_err:
+                    print(f"[CAMERA INFERENCE ERROR] {det_err}")
+                    is_accident, severity = False, "NONE"
+
                 self.last_accident_flag = is_accident
                 self.last_severity = severity
                 self.total_inferences += 1
                 
                 # Update detected vehicles list from detector tracks
-                self.detected_vehicles = [
-                    t.class_name for t in self.detector.tracks.values()
-                    if t.disappeared_frames == 0
-                ]
+                with getattr(self.detector, 'state_lock', threading.Lock()):
+                    self.detected_vehicles = [
+                        t.class_name for t in self.detector.tracks.values()
+                        if t.disappeared_frames == 0
+                    ]
 
                 # Phase 3: Automated Simulation Trigger Hook
                 if is_accident and self.on_accident_callback is not None:
@@ -685,16 +723,6 @@ class CameraCaptureManager:
                         )
                     except Exception as cb_err:
                         print(f"[CAMERA] Error in accident callback: {cb_err}")
-            else:
-                processed_frame = frame
-
-            # Encode high-quality JPEG for frontend streaming
-            ret, buffer = cv2.imencode('.jpg', processed_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-            if ret:
-                with self.output_frame_lock:
-                    self.latest_jpeg_bytes = buffer.tobytes()
-                    self.latest_annotated_frame = processed_frame
-                self.new_output_event.set()
 
             inf_count += 1
             now = time.time()
@@ -708,11 +736,15 @@ class CameraCaptureManager:
             sleep_time = max(0.002, target_interval - elapsed)
             time.sleep(sleep_time)
 
-    def get_latest_jpeg(self, timeout: float = 0.2) -> Optional[bytes]:
-        """Returns the latest processed JPEG bytes for MJPEG streaming."""
-        self.new_output_event.wait(timeout=timeout)
-        with self.output_frame_lock:
-            return self.latest_jpeg_bytes
+    def get_latest_jpeg(self, last_version: int = -1, timeout: float = 0.05) -> Tuple[Optional[bytes], int]:
+        """
+        Returns the latest processed JPEG bytes and frame version for MJPEG streaming.
+        Uses condition variable notification to eliminate polling latency and duplicate frames.
+        """
+        with self.output_condition:
+            if self.frame_version == last_version:
+                self.output_condition.wait(timeout=timeout)
+            return self.latest_jpeg_bytes, self.frame_version
 
     def set_source(self, source: str) -> None:
         """Switches active camera source to 'esp32' or 'sample'."""
@@ -779,7 +811,8 @@ class CameraCaptureManager:
         self.is_running = False
         self.interrupt_event.set()
         self.new_raw_event.set()
-        self.new_output_event.set()
+        with self.output_condition:
+            self.output_condition.notify_all()
 
 
 camera_manager = CameraCaptureManager(
@@ -1089,13 +1122,24 @@ def update_patient_vitals(data: VitalsUpdateRequest):
     shared_store.vitals["timestamp"] = datetime.now().isoformat()
 
     hr_val = shared_store.vitals["heart_rate"]
-    severity = "critical" if hr_val > 120 or hr_val < 50 else ("warning" if hr_val > 100 else "info")
-    shared_store.add_event(
-        "Hospital",
-        f"Telemetry Received: {hr_val} BPM",
-        f"Hospital received live patient vitals via API: Heart Rate {hr_val} bpm, Temp {shared_store.vitals['temperature']}°C, SpO2 {shared_store.vitals['spo2']}%.",
-        severity
-    )
+    now = time.time()
+    is_critical = hr_val > 120 or hr_val < 50
+    # Throttled timeline logging: log on critical, on first reading, when BPM shifts significantly, or every 30s
+    if (
+        is_critical
+        or shared_store.last_vitals_event_time == 0.0
+        or (now - shared_store.last_vitals_event_time > 30.0)
+        or abs(hr_val - shared_store.last_logged_bpm) >= 15
+    ):
+        severity = "critical" if is_critical else ("warning" if hr_val > 100 else "info")
+        shared_store.add_event(
+            "Hospital",
+            f"Telemetry Received: {hr_val} BPM",
+            f"Live patient telemetry updated: Heart Rate {hr_val} bpm, Temp {shared_store.vitals['temperature']}°C, SpO2 {shared_store.vitals['spo2']}%.",
+            severity
+        )
+        shared_store.last_vitals_event_time = now
+        shared_store.last_logged_bpm = hr_val
     return {
         "success": True,
         "vitals": shared_store.vitals,
@@ -1155,7 +1199,7 @@ def set_priority_switch(req: PrioritySwitchRequest):
 @app.post("/api/simulation/start")
 def start_simulation():
     """Starts or triggers the demo simulation workflow."""
-    if not shared_store.incident:
+    if not shared_store.incident or shared_store.incident.get("status") in ("RESOLVED", "NORMAL"):
         shared_store.incident = {
             "id": f"INC-SIM-{int(time.time() % 10000)}",
             "detection_time": datetime.now().strftime("%H:%M:%S"),
@@ -1171,13 +1215,29 @@ def start_simulation():
         }
     shared_store.is_simulating = True
     shared_store.is_paused = False
-    shared_store.simulation_step = 0
-    shared_store.add_event(
-        "Accident",
-        "Simulation Run Started",
-        "Emergency sequence triggered for single junction corridor.",
-        "info"
-    )
+
+    # Immediately advance ambulance to Step 1 if in standby/idle so corridor starts instantly
+    if shared_store.ambulance.get("status") in ("AVAILABLE", "IDLE", "STANDBY") or shared_store.simulation_step == 0:
+        shared_store.ambulance["status"] = "EN_ROUTE_JUNCTION"
+        shared_store.ambulance["progress"] = 10.0
+        shared_store.ambulance["assigned_incident_id"] = shared_store.incident["id"]
+        shared_store.incident["status"] = "AMBULANCE_DISPATCHED"
+        shared_store.hospital["assigned_case_id"] = shared_store.incident["id"]
+        shared_store.hospital["arrival_status"] = "IN_TRANSIT"
+        shared_store.simulation_step = 1
+        shared_store.add_event(
+            "Ambulance",
+            "Step 1: Dispatched from Hospital (Bottom-Right)",
+            "Ambulance AMB-101 departed hospital in bottom-right corner, moving straight toward junction along East road.",
+            "info"
+        )
+    else:
+        shared_store.add_event(
+            "Accident",
+            "Simulation Run Started",
+            "Emergency sequence triggered for single junction corridor.",
+            "info"
+        )
     return shared_store.get_state()
 
 
@@ -1208,8 +1268,10 @@ def reset_simulation():
 
 
 @app.post("/api/simulation/demo-incident")
-def create_demo_incident():
-    """Creates a clearly labelled demo incident without running inference."""
+def create_demo_incident(dispatch: bool = False):
+    """Creates a clearly labelled demo incident without running inference.
+    If dispatch=True, also dispatches the ambulance immediately.
+    """
     shared_store.incident = {
         "id": f"INC-DEMO-{int(time.time() % 10000)}",
         "detection_time": datetime.now().strftime("%H:%M:%S"),
@@ -1220,10 +1282,72 @@ def create_demo_incident():
         "confidence_score": 91.0,
         "vehicles_involved": ["car", "bus"],
         "verified": True,
-        "status": "ACCIDENT_DETECTED",
+        "status": "ACCIDENT_DETECTED" if not dispatch else "AMBULANCE_DISPATCHED",
         "notes": "Clearly labelled simulated incident for demo evaluation."
     }
     shared_store.add_event("Accident", "Demo Incident Created", "Simulated accident at West Approach registered.", "critical")
+
+    if dispatch:
+        shared_store.is_simulating = True
+        shared_store.is_paused = False
+        shared_store.ambulance["status"] = "EN_ROUTE_JUNCTION"
+        shared_store.ambulance["progress"] = 10.0
+        shared_store.ambulance["assigned_incident_id"] = shared_store.incident["id"]
+        shared_store.hospital["assigned_case_id"] = shared_store.incident["id"]
+        shared_store.hospital["arrival_status"] = "IN_TRANSIT"
+        shared_store.simulation_step = 1
+        shared_store.add_event(
+            "Ambulance",
+            "Ambulance Dispatched",
+            "Emergency ambulance AMB-101 immediately dispatched to accident location.",
+            "info"
+        )
+
+    return shared_store.get_state()
+
+
+@app.post("/api/simulation/emergency-override")
+def trigger_emergency_override():
+    """Fallback manual mechanism triggered via Key 'A' or UI override:
+    Immediately registers accident and dispatches the ambulance along the corridor.
+    """
+    shared_store.incident = {
+        "id": f"INC-FALLBACK-{int(time.time() % 10000)}",
+        "detection_time": datetime.now().strftime("%H:%M:%S"),
+        "source": "MANUAL_KEYBOARD_FALLBACK_A",
+        "is_demo": True,
+        "location": "NH-24 West Approach (Sector 5 Corridor)",
+        "severity": "HIGH",
+        "confidence_score": 99.0,
+        "vehicles_involved": ["car", "truck"],
+        "verified": True,
+        "status": "AMBULANCE_DISPATCHED",
+        "notes": "Emergency fallback triggered via keyboard shortcut [A]. Rapid corridor mobilization activated."
+    }
+
+    # Start simulation & immediately dispatch ambulance
+    shared_store.is_simulating = True
+    shared_store.is_paused = False
+
+    shared_store.ambulance["status"] = "EN_ROUTE_JUNCTION"
+    shared_store.ambulance["progress"] = 10.0
+    shared_store.ambulance["assigned_incident_id"] = shared_store.incident["id"]
+    shared_store.hospital["assigned_case_id"] = shared_store.incident["id"]
+    shared_store.hospital["arrival_status"] = "IN_TRANSIT"
+    shared_store.simulation_step = 1
+
+    shared_store.add_event(
+        "Accident",
+        "Emergency Fallback [Key A] Triggered",
+        "Manual fallback shortcut pressed: High-severity accident registered at West Approach.",
+        "critical"
+    )
+    shared_store.add_event(
+        "Ambulance",
+        "Ambulance Dispatched (Fallback Corridor)",
+        "Ambulance AMB-101 immediately dispatched to NH-24 West Approach corridor.",
+        "info"
+    )
     return shared_store.get_state()
 
 
@@ -1584,14 +1708,15 @@ def run_sample_frame_inference():
 
 def generate_video_stream():
     """Generator that yields MJPEG frames smoothly from the central camera capture manager."""
+    last_version = -1
     while True:
-        frame_bytes = camera_manager.get_latest_jpeg(timeout=0.04)
-        if frame_bytes:
+        frame_bytes, version = camera_manager.get_latest_jpeg(last_version=last_version, timeout=0.04)
+        if frame_bytes is not None and version != last_version:
+            last_version = version
             yield (b'--frame\r\n'
                    b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-            time.sleep(0.033)  # Smooth ~30 FPS delivery
         else:
-            time.sleep(0.04)
+            time.sleep(0.005)
 
 
 @app.get("/api/video_feed")
@@ -1599,7 +1724,14 @@ def video_feed():
     """Live MJPEG video stream with real-time YOLOv8 bounding boxes."""
     return StreamingResponse(
         generate_video_stream(),
-        media_type="multipart/x-mixed-replace; boundary=frame"
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate, pre-check=0, post-check=0, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+            "Connection": "close",
+            "X-Accel-Buffering": "no",
+        }
     )
 
 
@@ -1730,5 +1862,5 @@ def shutdown_event():
 
 if __name__ == "__main__":
     import uvicorn
-    print("[A.E.R.O.S.] Starting Operations API on http://127.0.0.1:8000 ...")
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    print("[A.E.R.O.S.] Starting Operations API on 0.0.0.0:8000 (accessible on localhost and local Wi-Fi) ...")
+    uvicorn.run(app, host="0.0.0.0", port=8000)

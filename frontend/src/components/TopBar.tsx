@@ -20,7 +20,8 @@ export const TopBar: React.FC = () => {
     startSimulation, 
     pauseSimulation, 
     resumeSimulation, 
-    resetSimulation 
+    resetSimulation,
+    triggerEmergencyOverride 
   } = useAeros();
 
   const [currentTime, setCurrentTime] = useState<string>('');
@@ -140,9 +141,13 @@ export const TopBar: React.FC = () => {
         {/* Right: Master Simulation Controls & Key Shortcut Hint */}
         <div className="flex items-center gap-2.5">
           
-          <span className="hidden xl:inline-block text-[11px] text-[#6B7280] font-mono bg-slate-100 px-2 py-1 rounded-md border border-slate-200" title="Press key 'A' anytime to trigger emergency collision">
-            Shortcut: <kbd className="font-bold text-[#1F2937]">Key 'A'</kbd>
-          </span>
+          <button
+            onClick={triggerEmergencyOverride}
+            className="hidden xl:inline-flex items-center gap-1.5 text-[11px] text-[#6B7280] hover:text-red-600 font-mono bg-slate-100 hover:bg-red-50 px-2.5 py-1 rounded-md border border-slate-200 hover:border-red-200 transition-colors cursor-pointer"
+            title="Press 'A' on keyboard (or click) to register accident and dispatch ambulance"
+          >
+            Emergency Fallback: <kbd className="font-bold text-[#1F2937] hover:text-red-700 bg-white px-1 rounded shadow-2xs border border-slate-200">Key 'A'</kbd>
+          </button>
 
           {/* Master Simulation Controls */}
           {!isSimulating ? (
